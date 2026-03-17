@@ -209,6 +209,7 @@
       </div>
     </div>
   </div>
+  <FloatingErrorToast :message="actionError" />
 </template>
 
 <script setup lang="ts">
@@ -230,7 +231,9 @@ import {
 import { apiGet, apiPost, apiDelete } from '../api'
 import LoadingSpinner from './LoadingSpinner.vue'
 import EmptyState from './EmptyState.vue'
+import FloatingErrorToast from './FloatingErrorToast.vue'
 import { isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
+import { useTransientMessage } from '../composables/useTransientMessage'
 
 interface Track {
   id: number
@@ -245,6 +248,7 @@ interface Track {
 const tracks = ref<Track[]>([])
 const loading = ref(false)
 const error = ref('')
+const { message: actionError, showMessage: showActionError } = useTransientMessage()
 const searchQuery = ref('')
 const selectedTracks = ref<Set<number>>(new Set())
 const currentPlayingId = ref<number | null>(null)
@@ -320,7 +324,7 @@ async function playTrack(track: Track) {
     await apiPost(`/queue/${track.id}/play`, {})
     currentPlayingId.value = track.id
   } catch (e: any) {
-    error.value = String(e?.message ?? e)
+    showActionError(`播放失败: ${String(e?.message ?? e)}`)
   }
 }
 
@@ -333,7 +337,7 @@ async function removeTrack(trackId: number) {
         selectedTracks.value.delete(trackId)
     }
   } catch (e: any) {
-    error.value = String(e?.message ?? e)
+    showActionError(`移除失败: ${String(e?.message ?? e)}`)
   }
 }
 
@@ -346,7 +350,7 @@ async function deleteSelected() {
     
     await Promise.all(ids.map(id => apiDelete(`/queue/${id}`)))
   } catch (e: any) {
-    error.value = String(e?.message ?? e)
+    showActionError(`批量删除失败: ${String(e?.message ?? e)}`)
     void loadTracks()
   }
 }
@@ -375,7 +379,7 @@ async function clearAllTracks() {
     tracks.value = previousTracks
     selectedTracks.value = previousSelected
     currentPlayingId.value = previousCurrentPlayingId
-    error.value = String(e?.message ?? e)
+    showActionError(`清空队列失败: ${String(e?.message ?? e)}`)
   }
 }
 
@@ -410,7 +414,7 @@ async function updateTrackOrder() {
     const trackIds = tracks.value.map(t => t.id)
     await apiPost('/queue/reorder', { track_ids: trackIds })
   } catch (e: any) {
-    error.value = String(e?.message ?? e)
+    showActionError(`保存顺序失败: ${String(e?.message ?? e)}`)
   }
 }
 

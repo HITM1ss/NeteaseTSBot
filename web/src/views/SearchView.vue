@@ -14,7 +14,9 @@ import {
 } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
+import FloatingErrorToast from '../components/FloatingErrorToast.vue'
 import { getFavoriteSongs, isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
+import { useTransientMessage } from '../composables/useTransientMessage'
 
 const keywords = ref('')
 const error = ref('')
@@ -27,6 +29,7 @@ const showSuggestions = ref(false)
 const defaultKeyword = ref('')
 const selectedPlatform = ref<'netease' | 'qqmusic'>('netease')
 const qqMusicConfigured = ref(false)
+const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
 // 搜索历史和分页
 const searchHistory = ref<string[]>([])
@@ -240,8 +243,7 @@ async function enqueue(song: any, playNow: boolean) {
     }, 3000)
   } catch (e: any) {
     const msg = String(e?.message ?? e)
-    error.value = msg
-    alert(`点歌失败: ${msg}`)
+    showActionError(playNow ? `点歌失败: ${msg}` : `添加到队列失败: ${msg}`)
   }
 }
 
@@ -588,4 +590,5 @@ onMounted(() => {
     </div>
 
   </div>
+  <FloatingErrorToast :message="actionError" />
 </template>

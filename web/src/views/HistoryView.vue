@@ -10,10 +10,13 @@ import {
   Music,
   Calendar
 } from 'lucide-vue-next'
+import FloatingErrorToast from '../components/FloatingErrorToast.vue'
+import { useTransientMessage } from '../composables/useTransientMessage'
 
 const error = ref('')
 const history = ref<any[]>([])
 const loading = ref(false)
+const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
 async function load() {
   loading.value = true
@@ -32,7 +35,8 @@ async function playTrack(track: any) {
   try {
     await apiPost(`/history/${track.id}/replay?play_now=true`)
   } catch (e: any) {
-    error.value = String(e?.message ?? e)
+    const msg = String(e?.message ?? e)
+    showActionError(`点歌失败: ${msg}`)
   }
 }
 
@@ -40,7 +44,8 @@ async function addToQueue(track: any) {
   try {
     await apiPost(`/history/${track.id}/replay?play_now=false`)
   } catch (e: any) {
-    error.value = String(e?.message ?? e)
+    const msg = String(e?.message ?? e)
+    showActionError(`添加到队列失败: ${msg}`)
   }
 }
 
@@ -218,4 +223,5 @@ onMounted(load)
       </div>
     </div>
   </div>
+  <FloatingErrorToast :message="actionError" />
 </template>

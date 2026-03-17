@@ -12,6 +12,8 @@ import {
   AlertCircle
 } from 'lucide-vue-next'
 import { getFavoriteSongs, isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
+import FloatingErrorToast from '../components/FloatingErrorToast.vue'
+import { useTransientMessage } from '../composables/useTransientMessage'
 
 const USER_COOKIE_KEY = 'tsbot_user_netease_cookie'
 const LIKES_CACHE_KEY = 'tsbot_likes_cache'
@@ -25,6 +27,7 @@ const loading = ref(false)
 
 const offset = ref(0)
 const hasMore = ref(false)
+const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
 const favoriteSongIds = ref<Set<number>>(new Set())
 
@@ -151,8 +154,7 @@ async function playTrack(song: any) {
     await apiPost('/queue/netease', buildNeteaseQueuePayload(song, true))
   } catch (e: any) {
     const msg = String(e?.message ?? e)
-    error.value = msg
-    alert(`点歌失败: ${msg}`)
+    showActionError(`点歌失败: ${msg}`)
   }
 }
 
@@ -161,8 +163,7 @@ async function addToQueue(song: any) {
     await apiPost('/queue/netease', buildNeteaseQueuePayload(song, false))
   } catch (e: any) {
     const msg = String(e?.message ?? e)
-    error.value = msg
-    alert(`点歌失败: ${msg}`)
+    showActionError(`添加到队列失败: ${msg}`)
   }
 }
 
@@ -343,4 +344,5 @@ onMounted(() => {
       </div>
     </div>
   </div>
+  <FloatingErrorToast :message="actionError" />
 </template>

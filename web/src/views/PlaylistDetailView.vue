@@ -16,7 +16,9 @@ import {
 } from 'lucide-vue-next'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import EmptyState from '../components/EmptyState.vue'
+import FloatingErrorToast from '../components/FloatingErrorToast.vue'
 import { getFavoritePlaylists, getFavoriteSongs, toggleFavoritePlaylist, toggleFavoriteSong } from '../utils/favorites'
+import { useTransientMessage } from '../composables/useTransientMessage'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,6 +29,7 @@ const error = ref('')
 const status = ref('')
 const playlist = ref<any>(null)
 const tracks = ref<any[]>([])
+const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
 const isFavPlaylist = ref(false)
 const favSongIds = ref<Set<number>>(new Set())
@@ -127,7 +130,7 @@ async function enqueue(track: any, playNow: boolean = false) {
   } catch (e: any) {
     console.error('Failed to enqueue:', e)
     const msg = String(e?.message ?? e)
-    alert(`点歌失败: ${msg}`)
+    showActionError(playNow ? `点歌失败: ${msg}` : `添加到队列失败: ${msg}`)
   }
 }
 
@@ -346,4 +349,5 @@ onMounted(() => {
       </div>
     </div>
   </div>
+  <FloatingErrorToast :message="actionError" />
 </template>

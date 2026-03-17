@@ -10,7 +10,9 @@ import {
   Plus,
 } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
+import FloatingErrorToast from '../components/FloatingErrorToast.vue'
 import { apiPost } from '../api'
+import { useTransientMessage } from '../composables/useTransientMessage'
 import { buildNeteaseQueuePayload } from '../utils/queue'
 import {
   getFavoritePlaylists,
@@ -28,7 +30,7 @@ const router = useRouter()
 const activeTab = ref<'songs' | 'playlists'>('songs')
 const songs = ref<FavoriteSong[]>([])
 const playlists = ref<FavoritePlaylist[]>([])
-const error = ref('')
+const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
 function refresh() {
   songs.value = getFavoriteSongs()
@@ -56,8 +58,7 @@ async function playSong(song: FavoriteSong) {
     await apiPost('/queue/netease', buildNeteaseQueuePayload(song, true))
   } catch (e: any) {
     const msg = String(e?.message ?? e)
-    error.value = msg
-    alert(`点歌失败: ${msg}`)
+    showActionError(`点歌失败: ${msg}`)
   }
 }
 
@@ -66,8 +67,7 @@ async function addToQueue(song: FavoriteSong) {
     await apiPost('/queue/netease', buildNeteaseQueuePayload(song, false))
   } catch (e: any) {
     const msg = String(e?.message ?? e)
-    error.value = msg
-    alert(`添加到队列失败: ${msg}`)
+    showActionError(`添加到队列失败: ${msg}`)
   }
 }
 
@@ -128,10 +128,6 @@ onMounted(refresh)
     </div>
 
     <div class="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6 pb-24 scrollbar-thin">
-      <div v-if="error" class="mb-6 bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
-        {{ error }}
-      </div>
-
       <template v-if="activeTab === 'songs'">
         <EmptyState
           v-if="sortedSongs.length === 0"
@@ -230,7 +226,7 @@ onMounted(refresh)
             </tbody>
           </table>
         </div>
-      </template>
+</template>
 
       <template v-else>
         <EmptyState
@@ -295,4 +291,5 @@ onMounted(refresh)
       </template>
     </div>
   </div>
+  <FloatingErrorToast :message="actionError" />
 </template>
