@@ -14,6 +14,7 @@ name: Docker Publish
       - 'Dockerfile.voice-service'
       - 'Dockerfile.web'
       - 'docker-compose.yml'
+      - 'docker-compose.prebuilt.yml'
       - 'docker/**'
       - 'README.md'
       - 'README.en.md'
@@ -41,6 +42,7 @@ name: Docker Publish
       - 'Dockerfile.voice-service'
       - 'Dockerfile.web'
       - 'docker-compose.yml'
+      - 'docker-compose.prebuilt.yml'
       - 'docker/**'
       - 'README.md'
       - 'README.en.md'
@@ -64,6 +66,7 @@ name: Docker Publish
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: docker-publish-${{ github.ref }}
@@ -104,8 +107,10 @@ jobs:
             namespace="$GITHUB_REPOSITORY_OWNER"
           fi
           namespace="$(echo "$namespace" | tr '[:upper:]' '[:lower:]')"
+          ghcr_owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           repo="$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
           echo "namespace=${namespace}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_owner=${ghcr_owner}" >> "$GITHUB_OUTPUT"
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
 
       - name: Check Docker Hub credentials
@@ -125,11 +130,21 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: docker.io/${{ steps.prep.outputs.namespace }}/${{ steps.prep.outputs.repo }}-${{ matrix.image_suffix }}
+          images: |
+            docker.io/${{ steps.prep.outputs.namespace }}/${{ steps.prep.outputs.repo }}-${{ matrix.image_suffix }}
+            ghcr.io/${{ steps.prep.outputs.ghcr_owner }}/${{ steps.prep.outputs.repo }}-${{ matrix.image_suffix }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -213,7 +228,7 @@ jobs:
           rsync -a proto/ "$bundle_dir/proto/"
           rsync -a web/dist/ "$bundle_dir/web/dist/"
           install -m 755 voice-service/target/release/voice-service "$bundle_dir/bin/voice-service"
-          cp tsbot.env.example README.md README.en.md HOWTOSTART.md LICENSE docker-compose.yml "$bundle_dir/"
+          cp tsbot.env.example README.md README.en.md HOWTOSTART.md LICENSE docker-compose.yml docker-compose.prebuilt.yml "$bundle_dir/"
           cp run-backend.sh run-web.sh run-voicemake.sh nohup-start.sh nohup-stop.sh nohup-status.sh "$bundle_dir/"
           mkdir -p dist
           tar -C "$RUNNER_TEMP" -czf "dist/${{ steps.pkg.outputs.archive }}" "${{ steps.pkg.outputs.bundle }}"

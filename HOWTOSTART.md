@@ -194,6 +194,7 @@ npm.cmd --prefix web run dev
 项目根目录已提供：
 
 - `docker-compose.yml`
+- `docker-compose.prebuilt.yml`
 - `Dockerfile.backend`
 - `Dockerfile.voice-service`
 - `Dockerfile.web`
@@ -231,6 +232,29 @@ docker compose down
 - `50051:50051`（voice-service gRPC）
 - `8009:8009`（backend）
 - `8080:8080`（web，Nginx 托管生产前端产物，并将 `/api/*` 反向代理到 backend）
+
+### 5. 使用预构建镜像（Docker Hub / GHCR）
+
+如果你不想在本机构建，也可以直接使用仓库发布的预构建镜像。项目额外提供了 `docker-compose.prebuilt.yml`：
+
+```bash
+# Docker Hub（默认 latest）
+docker compose -f docker-compose.prebuilt.yml up -d
+
+# 固定版本，例如 v0.4.0
+TSBOT_IMAGE_TAG=v0.4.0 docker compose -f docker-compose.prebuilt.yml up -d
+
+# 改用 GHCR
+TSBOT_IMAGE_REGISTRY=ghcr.io \
+TSBOT_IMAGE_NAMESPACE=yumi118 \
+docker compose -f docker-compose.prebuilt.yml up -d
+```
+
+补充说明：
+
+- GitHub **Packages** 页面显示的是 GHCR 包；如果只推 Docker Hub，这里会是空的。
+- 现在看到 `backend` / `web` / `voice-service` 三个镜像仓库是正常的，因为当前发布策略就是按三个服务分别构建。
+- GitHub **Releases** 页面里的 `tar.gz` 与 `SHA256SUMS.txt` 是软件包归档，不是 Docker 镜像。
 
 ## 环境变量配置
 

@@ -241,6 +241,7 @@ Local development uses `http://127.0.0.1:5173` by default and proxies `/api` to 
 The repository now includes:
 
 - `docker-compose.yml`
+- `docker-compose.prebuilt.yml`
 - `Dockerfile.backend`
 - `Dockerfile.voice-service`
 - `Dockerfile.web`
@@ -280,6 +281,38 @@ Compose starts 3 services by default:
 - `voice-service` (`50051`)
 - `backend` (`8009`)
 - `web` (`8080`, Nginx serves the production frontend bundle and reverse-proxies `/api/*` to backend)
+
+### 5) Use published images directly (Docker Hub / GHCR)
+
+If you do not want to build locally, you can consume the prebuilt images published by GitHub Actions. The repository also ships `docker-compose.prebuilt.yml`, which pulls the official Docker Hub images by default:
+
+```bash
+# Docker Hub (default latest)
+docker compose -f docker-compose.prebuilt.yml up -d
+
+# Pin a release tag, for example v0.4.0
+TSBOT_IMAGE_TAG=v0.4.0 docker compose -f docker-compose.prebuilt.yml up -d
+
+# Switch to GHCR
+TSBOT_IMAGE_REGISTRY=ghcr.io \
+TSBOT_IMAGE_NAMESPACE=yumi118 \
+docker compose -f docker-compose.prebuilt.yml up -d
+```
+
+Image naming format (the current upstream owner / namespace is `yumi118`; forks can override via env vars):
+
+- `docker.io/<namespace>/neteasetsbot-backend:<tag>`
+- `docker.io/<namespace>/neteasetsbot-web:<tag>`
+- `docker.io/<namespace>/neteasetsbot-voice-service:<tag>`
+- `ghcr.io/<owner>/neteasetsbot-backend:<tag>`
+- `ghcr.io/<owner>/neteasetsbot-web:<tag>`
+- `ghcr.io/<owner>/neteasetsbot-voice-service:<tag>`
+
+Notes:
+
+- GitHub **Packages** only shows GHCR packages, so it stays empty if you only push to Docker Hub.
+- Seeing **3 image repositories** is expected because the project publishes `backend`, `web`, and `voice-service` separately.
+- GitHub **Releases** also includes `tsbot-<version>-linux-amd64.tar.gz` and `SHA256SUMS.txt`; those are downloadable bundles, not container images.
 
 ## Default Ports
 

@@ -276,6 +276,38 @@ Compose 默认会启动 3 个服务：
 - `backend`（8009）
 - `web`（8080，Nginx 托管生产前端产物，并将 `/api/*` 反向代理到 backend）
 
+### 5) 直接使用已发布镜像（Docker Hub / GHCR）
+
+如果你不想在本机构建，也可以直接使用仓库 GitHub Actions 发布好的预构建镜像。项目额外提供了 `docker-compose.prebuilt.yml`，默认拉取 Docker Hub 官方镜像：
+
+```bash
+# Docker Hub（默认 latest）
+docker compose -f docker-compose.prebuilt.yml up -d
+
+# 固定版本，例如 v0.4.0
+TSBOT_IMAGE_TAG=v0.4.0 docker compose -f docker-compose.prebuilt.yml up -d
+
+# 切换到 GHCR
+TSBOT_IMAGE_REGISTRY=ghcr.io \
+TSBOT_IMAGE_NAMESPACE=yumi118 \
+docker compose -f docker-compose.prebuilt.yml up -d
+```
+
+镜像命名格式如下（当前主仓库默认 owner / namespace 为 `yumi118`，fork 可通过环境变量覆盖）：
+
+- `docker.io/<namespace>/neteasetsbot-backend:<tag>`
+- `docker.io/<namespace>/neteasetsbot-web:<tag>`
+- `docker.io/<namespace>/neteasetsbot-voice-service:<tag>`
+- `ghcr.io/<owner>/neteasetsbot-backend:<tag>`
+- `ghcr.io/<owner>/neteasetsbot-web:<tag>`
+- `ghcr.io/<owner>/neteasetsbot-voice-service:<tag>`
+
+说明：
+
+- GitHub 的 **Packages** 页面只显示 GHCR 包；如果只推 Docker Hub，这里会是空的。
+- 现在会看到 **3 个镜像仓库**，这是正常现象，因为项目按 `backend` / `web` / `voice-service` 三个服务分别构建与发布。
+- GitHub 的 **Releases** 页面会额外附带 `tsbot-<version>-linux-amd64.tar.gz` 和 `SHA256SUMS.txt`，那是软件包，不是容器镜像。
+
 ## 默认端口
 
 - **voice-service gRPC**: `127.0.0.1:50051`

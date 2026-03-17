@@ -1,0 +1,33 @@
+services:
+  voice-service:
+    image: ${TSBOT_IMAGE_REGISTRY:-docker.io}/${TSBOT_IMAGE_NAMESPACE:-yumi118}/${TSBOT_IMAGE_REPO:-neteasetsbot}-voice-service:${TSBOT_IMAGE_TAG:-latest}
+    env_file:
+      - tsbot.env
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./logs:/app/logs
+
+  backend:
+    image: ${TSBOT_IMAGE_REGISTRY:-docker.io}/${TSBOT_IMAGE_NAMESPACE:-yumi118}/${TSBOT_IMAGE_REPO:-neteasetsbot}-backend:${TSBOT_IMAGE_TAG:-latest}
+    env_file:
+      - tsbot.env
+    environment:
+      TSBOT_HOST: 0.0.0.0
+      TSBOT_PORT: 8009
+      TSBOT_VOICE_GRPC_ADDR: voice-service:50051
+      DATABASE_URL: sqlite:///./data/tsbot.db
+    depends_on:
+      - voice-service
+    ports:
+      - "8009:8009"
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+
+  web:
+    image: ${TSBOT_IMAGE_REGISTRY:-docker.io}/${TSBOT_IMAGE_NAMESPACE:-yumi118}/${TSBOT_IMAGE_REPO:-neteasetsbot}-web:${TSBOT_IMAGE_TAG:-latest}
+    depends_on:
+      - backend
+    ports:
+      - "8080:8080"
