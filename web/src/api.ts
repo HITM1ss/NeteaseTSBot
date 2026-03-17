@@ -1,4 +1,5 @@
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://127.0.0.1:8009'
+const RAW_API_BASE = (import.meta as any).env?.VITE_API_BASE || '/api'
+const API_BASE = String(RAW_API_BASE).replace(/\/+$/, '')
 
 async function requestJson<T>(
   path: string,
@@ -21,13 +22,10 @@ async function requestJson<T>(
         }
       }
     } catch {
-      // ignore
     }
     if (!msg) {
       msg = `HTTP ${r.status}`
     }
-    // Some backends/proxies may prefix messages like "503: <detail>".
-    // Normalize to the human message for UI.
     msg = msg.replace(/^\s*\d{3}:\s*/g, '')
     throw new Error(msg)
   }

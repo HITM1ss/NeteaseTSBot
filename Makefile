@@ -1,10 +1,20 @@
- .PHONY: backend web voice voice-build voice-run voice-gdb voice-test-server
+.PHONY: all backend backend-setup web web-build voice voice-build voice-run voice-gdb voice-test-server
+
+all: backend-setup web-build voice-build
 
 backend:
-	backend/.venv/bin/uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+	backend/.venv/bin/uvicorn backend.main:app --reload --host 127.0.0.1 --port 8009
+
+backend-setup:
+	python3 -m venv backend/.venv
+	backend/.venv/bin/pip install -r backend/requirements.txt
 
 web:
 	cd web && npm run dev
+
+web-build:
+	npm --prefix web ci
+	npm --prefix web run build
 
 voice:
 	cd voice-service && $$HOME/.cargo/bin/cargo build

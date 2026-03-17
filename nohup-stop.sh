@@ -18,32 +18,27 @@ stop_one() {
   local name="$1"
   local port="$2"
   local pid_file="$ROOT_DIR/logs/${name}.pid"
-  
-  # Try to get PID from file first
+
   local pid=""
   if [[ -f "$pid_file" ]]; then
     pid=$(cat "$pid_file" 2>/dev/null || true)
     rm -f "$pid_file"
   fi
-  
-  # If no PID file, try to find by port
+
   if [[ -z "$pid" ]]; then
     pid=$(port_pid "$port" || true)
   fi
-  
+
   if [[ -n "$pid" ]]; then
     echo "[stop] ${name} (pid=${pid})"
-    # Send SIGTERM first for graceful shutdown
     kill -TERM "$pid" 2>/dev/null || true
-    
-    # Wait up to 10 seconds for graceful shutdown
+
     local count=0
     while kill -0 "$pid" 2>/dev/null && [[ $count -lt 10 ]]; do
       sleep 1
       ((count++))
     done
-    
-    # Force kill if still running
+
     if kill -0 "$pid" 2>/dev/null; then
       echo "[force-stop] ${name} (pid=${pid}) - graceful shutdown timeout"
       kill -9 "$pid" 2>/dev/null || true
@@ -58,8 +53,11 @@ stop_one() {
 
 echo "Stopping TSBot services..."
 
-# Stop in reverse order
-stop_one "web" "${VITE_DEV_PORT:-5173}"
+WEB_PORT="${TSBOT_WEB_PORT:-8080}"
+stop_one "web" "$WEB_PORT"
+if [[ "${VITE_DEV_PORT:-5173}" != "$WEB_PORT" ]]; then
+  stop_one "web-dev" "${VITE_DEV_PORT:-5173}"
+fi
 stop_one "backend" "${TSBOT_PORT:-8009}"
 stop_one "voice" 50051
 

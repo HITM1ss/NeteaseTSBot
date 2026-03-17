@@ -141,8 +141,11 @@ cp tsbot.env.example tsbot.env
 - `TSBOT_TS3_SERVER_PASSWORD` / `TSBOT_TS3_CHANNEL_PASSWORD` / `TSBOT_TS3_CHANNEL_PATH`
 - `TSBOT_TS3_IDENTITY` / `TSBOT_TS3_IDENTITY_FILE` / `TSBOT_TS3_AVATAR_DIR`
 - `TSBOT_ADMIN_TOKEN`：开启后端 admin 接口保护（请求头 `x-admin-token`）
-- `VITE_DEV_HOST` / `VITE_DEV_PORT`：前端 dev server 监听地址/端口
-- `VITE_API_BASE`：前端请求后端的 Base URL（默认 `http://127.0.0.1:8009`）
+- `TSBOT_WEB_HOST` / `TSBOT_WEB_PORT`：前端生产预览服务监听地址/端口（`run-web.sh` / `nohup-start.sh` 使用）
+- `TSBOT_WEB_API_PROXY_TARGET`：前端 dev / preview 代理到后端的目标地址（默认根据 `TSBOT_HOST` / `TSBOT_PORT` 推导）
+- `TSBOT_WEB_ALLOWED_HOSTS`：当你通过域名访问 Vite dev / preview 时允许的 host 白名单（逗号分隔）
+- `VITE_DEV_HOST` / `VITE_DEV_PORT`：前端本地 dev server 监听地址/端口
+- `VITE_API_BASE`：前端请求后端的 Base URL（推荐默认 `/api`，由 dev / preview / Docker 反向代理转发）
 
 ### 2) 安装依赖
 
@@ -174,22 +177,15 @@ cd ..
 make voice-build
 ```
 
-### 3) 一键启动（nohup，远程部署推荐）
+也可以直接使用仓库里补好的常用构建目标：
 
 ```bash
-chmod +x ./nohup-start.sh ./nohup-stop.sh ./nohup-status.sh
-
-# 启动（会分别启动 voice/backend/web，并写日志到 logs/）
-./nohup-start.sh
-
-# 查看状态（端口 + 日志路径）
-./nohup-status.sh
-
-# 停止
-./nohup-stop.sh
+make backend-setup
+make web-build
+make all
 ```
 
-### 4) 本地开发启动（前台运行）
+### 3) 前台启动（生产方式）
 
 开 3 个终端分别运行：
 
@@ -205,7 +201,42 @@ chmod +x ./nohup-start.sh ./nohup-stop.sh ./nohup-status.sh
 ./run-web.sh
 ```
 
-## Docker 部署（新增）
+以上脚本会自动读取项目根目录下的 `tsbot.env`。其中 `run-web.sh` 会先构建前端产物，再以 preview 方式监听 `TSBOT_WEB_PORT`（默认 `8080`）。
+
+### 4) 一键启动（nohup，远程部署推荐）
+
+```bash
+chmod +x ./nohup-start.sh ./nohup-stop.sh ./nohup-status.sh
+
+# 启动（会分别启动 voice/backend/web，并写日志到 logs/）
+./nohup-start.sh
+
+# 查看状态（端口 + 日志路径）
+./nohup-status.sh
+
+# 停止
+./nohup-stop.sh
+```
+
+### 5) 本地开发启动（带 reload / dev server）
+
+开 3 个终端分别运行：
+
+```bash
+./run-voicemake.sh
+```
+
+```bash
+backend/.venv/bin/uvicorn backend.main:app --reload --reload-exclude "backend/_generated/*" --host 127.0.0.1 --port 8009
+```
+
+```bash
+npm --prefix web run dev
+```
+
+本地开发默认访问 `http://127.0.0.1:5173`，并通过 `/api` 代理到后端。
+
+## Docker 部署
 
 ### 1) 准备环境变量
 
@@ -230,6 +261,7 @@ docker compose up -d --build
 ```bash
 docker compose ps
 docker compose logs -f backend
+docker compose logs -f web
 ```
 
 ### 4) 停止
@@ -242,13 +274,14 @@ Compose 默认会启动 3 个服务：
 
 - `voice-service`（50051）
 - `backend`（8009）
-- `web`（5173）
+- `web`（8080，Nginx 托管生产前端产物，并将 `/api/*` 反向代理到 backend）
 
 ## 默认端口
 
 - **voice-service gRPC**: `127.0.0.1:50051`
 - **backend**: `127.0.0.1:8009`（`TSBOT_PORT`）
-- **web (Vite dev)**: `127.0.0.1:5173`（`VITE_DEV_PORT`；`tsbot.env.example` 示例是 8080，以你的 `tsbot.env` 为准）
+- **web（生产脚本 / Docker）**: `127.0.0.1:8080`（`TSBOT_WEB_PORT`；Docker Compose 也暴露 `8080`）
+- **web（本地 dev server）**: `127.0.0.1:5173`（`VITE_DEV_PORT`）
 
 后端 OpenAPI 文档：
 
@@ -314,13 +347,16 @@ Web 控制台内置了 QQ 音乐扫码登录入口。
 ## 常见问题
 
 - **web 端口到底是 5173 还是 8080？**
-  - Vite 默认是 `5173`（见 `web/vite.config.ts`）。
-  - `tsbot.env.example` 示例是 `8080`。
-  - `nohup-start.sh` / `run-web.sh` 都会读取根目录 `tsbot.env`，以你实际导出的 `VITE_DEV_PORT` 为准。
+  - `5173` 是本地开发的 Vite dev server（`npm --prefix web run dev` / `VITE_DEV_PORT`）。
+  - `8080` 是生产前台启动和 Docker 的默认端口（`run-web.sh` / `nohup-start.sh` / `TSBOT_WEB_PORT`）。
 
 - **前端请求报错 / 连不上后端？**
-  - 默认后端是 `http://127.0.0.1:8009`。
-  - 如果你改了后端地址或端口，在 `web/.env` 或 `tsbot.env` 里设置 `VITE_API_BASE`。
+  - 推荐默认使用 `VITE_API_BASE=/api`，由 dev server / preview / Docker Nginx 反向代理到 backend。
+  - 如果你的前端和后端不走同源代理，可显式设置 `VITE_API_BASE`，或者把 `TSBOT_WEB_API_PROXY_TARGET` 改成对应后端地址。
+
+- **通过域名访问 Vite dev / preview 报安全错误？**
+  - 这是 Vite 的 host 校验。
+  - 在 `tsbot.env` 里设置 `TSBOT_WEB_ALLOWED_HOSTS="dev.example.com,.example.com"`，按需白名单放行，不要直接全开。
 
 - **后端连不上 voice-service？**
   - 检查 `TSBOT_VOICE_GRPC_ADDR` 是否为 `127.0.0.1:50051`

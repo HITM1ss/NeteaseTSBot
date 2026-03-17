@@ -39,20 +39,27 @@ A modern Vue.js frontend for the TSBot music player with comprehensive music man
    ```
 
 2. **Configure environment** (optional):
-   Create a `.env` file in the web directory:
+   The recommended default is same-origin `/api`, which works with the repository's Vite and Docker proxy setup:
    ```env
-   VITE_API_BASE=http://127.0.0.1:8009
+   VITE_API_BASE=/api
    ```
+   If your backend is on a completely different origin and you do not use the built-in proxy, set it to an absolute URL instead.
 
 3. **Development server**:
    ```bash
    npm run dev
    ```
-   The app will be available at `http://localhost:5173`
+   The app will be available at `http://localhost:5173` and proxies `/api` to the backend target derived from `TSBOT_HOST` / `TSBOT_PORT` (or `TSBOT_WEB_API_PROXY_TARGET`). If you access the dev server through a remote domain, also set `TSBOT_WEB_ALLOWED_HOSTS`.
 
 4. **Build for production**:
    ```bash
    npm run build
+   npm run preview -- --host 127.0.0.1 --port 8080
+   ```
+
+5. **Repository production helper**:
+   ```bash
+   ../run-web.sh
    ```
 
 ## Project Structure
@@ -169,8 +176,9 @@ The app uses TailwindCSS for styling. You can customize:
 
 1. **API Connection Failed**
    - Ensure backend server is running
-   - Check VITE_API_BASE environment variable
-   - Verify CORS settings on backend
+   - Recommended default is `VITE_API_BASE=/api`
+   - If you bypass same-origin proxying, point `VITE_API_BASE` or `TSBOT_WEB_API_PROXY_TARGET` at the correct backend
+   - If you access Vite through a domain, whitelist it via `TSBOT_WEB_ALLOWED_HOSTS`
 
 2. **NetEase Features Not Working**
    - Verify cookie is correctly set in Settings

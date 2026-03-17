@@ -66,16 +66,16 @@ source ~/.cargo/env
 make all
 
 # 或者分别构建
-make voice-build  # 构建语音服务
-make backend-setup  # 设置后端
-make web-build  # 构建前端
+make backend-setup  # 创建后端虚拟环境并安装依赖
+make web-build      # 安装前端依赖并构建生产产物
+make voice-build    # 构建语音服务
 ```
 
 ## 运行项目
 
 ### Linux
 
-#### 方法一：使用脚本（推荐）
+#### 方法一：前台启动（生产方式）
 ```bash
 # 启动语音服务
 ./run-voicemake.sh
@@ -83,11 +83,11 @@ make web-build  # 构建前端
 # 启动后端（新终端）
 ./run-backend.sh
 
-# 启动前端（新终端）
+# 启动前端生产预览（新终端）
 ./run-web.sh
 ```
 
-以上脚本会自动读取项目根目录下的 `tsbot.env`。
+以上脚本会自动读取项目根目录下的 `tsbot.env`。其中 `run-web.sh` 会先构建前端产物，再以 preview 方式监听 `TSBOT_WEB_PORT`（默认 `8080`）。
 
 #### 方法二（远程推荐）：使用 nohup 一键启动/停止（不依赖 screen/yum）
 ```bash
@@ -104,39 +104,22 @@ chmod +x ./nohup-start.sh ./nohup-stop.sh ./nohup-status.sh
 ./nohup-status.sh
 ```
 
-#### 方法三：手动启动
+#### 方法三：本地开发启动
+开 3 个终端分别运行：
 
-#### 1. 启动语音服务
 ```bash
-# 设置环境变量并启动
-TSBOT_TS3_HOST=your_teamspeak_host \
-TSBOT_TS3_PORT=9987 \
-TSBOT_TS3_NICKNAME=tsbot \
-TSBOT_TS3_CHANNEL_ID=2 \
-make voice-run
+./run-voicemake.sh
 ```
 
-#### 2. 启动后端
 ```bash
-# 激活虚拟环境
-source .venv/bin/activate
-
-# 启动后端服务
-TSBOT_HOST=127.0.0.1 \
-TSBOT_PORT=8009 \
-TSBOT_VOICE_GRPC_ADDR=127.0.0.1:50051 \
-python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8009
+backend/.venv/bin/uvicorn backend.main:app --reload --reload-exclude "backend/_generated/*" --host 127.0.0.1 --port 8009
 ```
 
-#### 3. 启动前端
 ```bash
-# 开发模式
 npm --prefix web run dev
-
-# 或者构建生产版本
-npm --prefix web run build
-npm --prefix web run preview
 ```
+
+本地开发默认访问 `http://127.0.0.1:5173`，并通过 `/api` 反向代理到 backend。
 
 ### Windows（PowerShell）
 
@@ -159,7 +142,7 @@ backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 npm.cmd --prefix web install
 ```
 
-#### 4. 启动后端与前端
+#### 4. 前台启动（生产方式）
 分别打开两个 PowerShell 窗口执行：
 
 ```powershell
@@ -170,9 +153,20 @@ npm.cmd --prefix web install
 .\run-web.ps1
 ```
 
-这两个脚本会自动读取项目根目录下的 `tsbot.env`。
+这两个脚本会自动读取项目根目录下的 `tsbot.env`。其中 `run-web.ps1` 会先构建前端产物，再以 preview 方式在 `TSBOT_WEB_PORT`（默认 `8080`）启动。
 
-#### 5. 启动语音服务
+#### 5. 本地开发启动
+分别打开两个 PowerShell 窗口执行：
+
+```powershell
+backend\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8009
+```
+
+```powershell
+npm.cmd --prefix web run dev
+```
+
+#### 6. 启动语音服务
 打开第三个 PowerShell 窗口执行：
 
 ```powershell
@@ -194,6 +188,7 @@ npm.cmd --prefix web install
 - `TSBOT_FFMPEG`
 
 如果暂时没有这些工具，后端和前端仍然可以正常启动，但播放控制相关接口会因为 gRPC 语音服务未启动而不可用。
+
 ## Docker 运行
 
 项目根目录已提供：
@@ -221,7 +216,8 @@ docker compose up -d --build
 
 ```bash
 docker compose ps
-docker compose logs -f
+docker compose logs -f backend
+docker compose logs -f web
 ```
 
 ### 4. 停止并清理容器
@@ -234,7 +230,7 @@ docker compose down
 
 - `50051:50051`（voice-service gRPC）
 - `8009:8009`（backend）
-- `5173:5173`（web）
+- `8080:8080`（web，Nginx 托管生产前端产物，并将 `/api/*` 反向代理到 backend）
 
 ## 环境变量配置
 
@@ -257,9 +253,18 @@ TSBOT_PORT=8009
 TSBOT_VOICE_GRPC_ADDR=127.0.0.1:50051
 TSBOT_COOKIE_KEY=change_me_to_a_random_string
 
-# 前端服务配置
+# 前端生产服务配置（run-web.sh / nohup-start.sh 使用）
+TSBOT_WEB_HOST=127.0.0.1
+TSBOT_WEB_PORT=8080
+# TSBOT_WEB_API_PROXY_TARGET=http://127.0.0.1:8009
+# TSBOT_WEB_ALLOWED_HOSTS=dev.example.com,.example.com
+
+# 前端开发服务配置（npm run dev 使用）
 VITE_DEV_HOST=127.0.0.1
 VITE_DEV_PORT=5173
+
+# 前端 API Base（推荐默认 /api，由 dev / preview / Docker 反向代理到 backend）
+VITE_API_BASE=/api
 
 # 日志配置
 TSBOT_LOG_LEVEL=INFO
@@ -295,9 +300,10 @@ TSBOT_NETEASE_API_BASE=http://127.0.0.1:3000/
 ## 访问应用
 
 启动成功后，访问：
-- **前端界面**: http://127.0.0.1:5173 (可通过 VITE_DEV_PORT 环境变量修改端口)
-- **后端API**: http://127.0.0.1:8009 (可通过 TSBOT_PORT 环境变量修改端口)
-- **API文档**: http://127.0.0.1:8009/docs
+- **前端界面（生产脚本 / Docker）**: http://127.0.0.1:8080 (可通过 `TSBOT_WEB_PORT` 修改；Docker Compose 默认也使用 `8080`)
+- **前端界面（本地开发）**: http://127.0.0.1:5173 (可通过 `VITE_DEV_PORT` 修改)
+- **后端 API**: http://127.0.0.1:8009 (可通过 `TSBOT_PORT` 环境变量修改端口)
+- **API 文档**: http://127.0.0.1:8009/docs
 
 ## 故障排除
 
@@ -326,7 +332,7 @@ TSBOT_NETEASE_API_BASE=http://127.0.0.1:3000/
    sudo apt install libssl-dev pkg-config
    
    # 重新构建
-   make clean
+   cargo clean --manifest-path voice-service/Cargo.toml
    make voice-build
    ```
 
@@ -341,7 +347,7 @@ TSBOT_NETEASE_API_BASE=http://127.0.0.1:3000/
 tail -f logs/backend.log
 
 # 查看语音服务日志
-tail -f logs/voice-service.log
+tail -f logs/voice.log
 ```
 
 ## 开发模式
@@ -349,7 +355,7 @@ tail -f logs/voice-service.log
 ### 热重载开发
 ```bash
 # 后端热重载
-source .venv/bin/activate
+source backend/.venv/bin/activate
 uvicorn backend.main:app --reload
 
 # 前端热重载
@@ -365,20 +371,13 @@ python backend/grpc_codegen.py
 ## 生产部署
 
 ### 使用 systemd 服务
-```bash
-# 复制服务文件
-sudo cp scripts/tsbot-*.service /etc/systemd/system/
+当前仓库**未内置** `systemd` service 模板。若你需要以 systemd 托管，请自行创建 service，并分别调用：
 
-# 启用服务
-sudo systemctl enable tsbot-backend
-sudo systemctl enable tsbot-voice
-sudo systemctl enable tsbot-web
+- `run-voicemake.sh`
+- `run-backend.sh`
+- `run-web.sh`
 
-# 启动服务
-sudo systemctl start tsbot-backend
-sudo systemctl start tsbot-voice
-sudo systemctl start tsbot-web
-```
+如果只是单机或轻量部署，优先使用上面的 `nohup-start.sh` / `nohup-stop.sh` / `nohup-status.sh`。
 
 ### 使用 Nginx 反向代理
 ```nginx
@@ -387,7 +386,7 @@ server {
     server_name your-domain.com;
     
     location / {
-        proxy_pass http://127.0.0.1:5173;
+        proxy_pass http://127.0.0.1:8080;
     }
     
     location /api {

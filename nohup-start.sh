@@ -34,19 +34,12 @@ start_one() {
   echo $! >"$ROOT_DIR/logs/${name}.pid"
 }
 
-# Ports are fixed by current code/config:
-# - voice-service listens on 127.0.0.1:50051 (Makefile voice-run)
-# - backend listens on ${TSBOT_HOST:-127.0.0.1}:${TSBOT_PORT:-8009}
-# - web dev server from Vite config (typically 8080 or 5173)
-
 start_one "voice" 50051 "$ROOT_DIR/logs/voice.log" "env HOME=/home/${SUDO_USER:-$USER} bash ./run-voicemake.sh"
 
-# backend port from env or default
 BACKEND_PORT="${TSBOT_PORT:-8009}"
 start_one "backend" "$BACKEND_PORT" "$ROOT_DIR/logs/backend.log" "./run-backend.sh"
 
-# web: get port from env or default
-WEB_PORT="${VITE_DEV_PORT:-5173}"
+WEB_PORT="${TSBOT_WEB_PORT:-8080}"
 start_one "web" "$WEB_PORT" "$ROOT_DIR/logs/web.log" "./run-web.sh"
 
 echo ""

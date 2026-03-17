@@ -141,8 +141,11 @@ Optional:
 - `TSBOT_TS3_SERVER_PASSWORD` / `TSBOT_TS3_CHANNEL_PASSWORD` / `TSBOT_TS3_CHANNEL_PATH`
 - `TSBOT_TS3_IDENTITY` / `TSBOT_TS3_IDENTITY_FILE` / `TSBOT_TS3_AVATAR_DIR`
 - `TSBOT_ADMIN_TOKEN`: enable backend admin endpoint protection (request header `x-admin-token`)
+- `TSBOT_WEB_HOST` / `TSBOT_WEB_PORT`: frontend production preview bind host/port (used by `run-web.sh` / `nohup-start.sh`)
+- `TSBOT_WEB_API_PROXY_TARGET`: proxy target for frontend dev / preview mode (defaults to `TSBOT_HOST` / `TSBOT_PORT`)
+- `TSBOT_WEB_ALLOWED_HOSTS`: comma-separated host allowlist when you access Vite dev / preview through a domain
 - `VITE_DEV_HOST` / `VITE_DEV_PORT`: frontend dev server bind host/port
-- `VITE_API_BASE`: frontend backend base URL (default `http://127.0.0.1:8009`)
+- `VITE_API_BASE`: frontend backend base URL (recommended default `/api`, forwarded by dev / preview / Docker reverse proxy)
 
 ### 2) Install Dependencies
 
@@ -174,22 +177,15 @@ Voice service (Rust):
 make voice-build
 ```
 
-### 3) One-Command Startup (`nohup`, recommended for remote servers)
+You can also use the convenience targets added to the repository:
 
 ```bash
-chmod +x ./nohup-start.sh ./nohup-stop.sh ./nohup-status.sh
-
-# Start (launches voice/backend/web and writes logs to logs/)
-./nohup-start.sh
-
-# Check status (ports + log paths)
-./nohup-status.sh
-
-# Stop
-./nohup-stop.sh
+make backend-setup
+make web-build
+make all
 ```
 
-### 4) Local Development Startup (foreground)
+### 3) Foreground Startup (production-style)
 
 Run in 3 terminals:
 
@@ -204,6 +200,41 @@ Run in 3 terminals:
 ```bash
 ./run-web.sh
 ```
+
+These scripts automatically read root `tsbot.env`. `run-web.sh` now builds the frontend bundle first, then serves it with `vite preview` on `TSBOT_WEB_PORT` (default `8080`).
+
+### 4) One-Command Startup (`nohup`, recommended for remote servers)
+
+```bash
+chmod +x ./nohup-start.sh ./nohup-stop.sh ./nohup-status.sh
+
+# Start (launches voice/backend/web and writes logs to logs/)
+./nohup-start.sh
+
+# Check status (ports + log paths)
+./nohup-status.sh
+
+# Stop
+./nohup-stop.sh
+```
+
+### 5) Local Development Startup (with reload / dev server)
+
+Run in 3 terminals:
+
+```bash
+./run-voicemake.sh
+```
+
+```bash
+backend/.venv/bin/uvicorn backend.main:app --reload --reload-exclude "backend/_generated/*" --host 127.0.0.1 --port 8009
+```
+
+```bash
+npm --prefix web run dev
+```
+
+Local development uses `http://127.0.0.1:5173` by default and proxies `/api` to the backend.
 
 ## Docker Deployment
 
@@ -235,6 +266,7 @@ docker compose up -d --build
 ```bash
 docker compose ps
 docker compose logs -f backend
+docker compose logs -f web
 ```
 
 ### 4) Stop
@@ -243,11 +275,18 @@ docker compose logs -f backend
 docker compose down
 ```
 
+Compose starts 3 services by default:
+
+- `voice-service` (`50051`)
+- `backend` (`8009`)
+- `web` (`8080`, Nginx serves the production frontend bundle and reverse-proxies `/api/*` to backend)
+
 ## Default Ports
 
 - **voice-service gRPC**: `127.0.0.1:50051`
 - **backend**: `127.0.0.1:8009` (`TSBOT_PORT`)
-- **web (Vite dev)**: `127.0.0.1:5173` (`VITE_DEV_PORT`; `tsbot.env.example` uses 8080 as an example, your `tsbot.env` wins)
+- **web (production / Docker / run-web.sh)**: `127.0.0.1:8080` (`TSBOT_WEB_PORT`)
+- **web (local dev server)**: `127.0.0.1:5173` (`VITE_DEV_PORT`)
 
 Backend OpenAPI docs:
 
@@ -313,13 +352,16 @@ See `LOGGING.md` for details (`scripts/log-viewer.sh` / `scripts/unified-logger.
 ## FAQ
 
 - **Is the web port 5173 or 8080?**
-  - Vite default is `5173` (see `web/vite.config.ts`)
-  - `tsbot.env.example` uses `8080` as an example
-  - `nohup-start.sh` / `run-web.sh` both read root `tsbot.env`; your exported `VITE_DEV_PORT` is final
+  - `5173` is the local Vite dev server (`npm --prefix web run dev` / `VITE_DEV_PORT`)
+  - `8080` is the production foreground and Docker default (`run-web.sh` / `nohup-start.sh` / `TSBOT_WEB_PORT`)
 
 - **Frontend request errors / cannot reach backend?**
-  - Default backend is `http://127.0.0.1:8009`
-  - If you changed backend host/port, set `VITE_API_BASE` in `web/.env` or `tsbot.env`
+  - Recommended default is `VITE_API_BASE=/api`, which is reverse-proxied by dev server / preview / Docker Nginx to backend
+  - If you do not use same-origin proxying, set `VITE_API_BASE` explicitly or point `TSBOT_WEB_API_PROXY_TARGET` at the backend
+
+- **Seeing a Vite host security error when accessing via domain?**
+  - That is Vite host validation working as designed.
+  - Set `TSBOT_WEB_ALLOWED_HOSTS="dev.example.com,.example.com"` in `tsbot.env` and only whitelist the domains you really need.
 
 - **Backend cannot reach voice-service?**
   - Check `TSBOT_VOICE_GRPC_ADDR` is `127.0.0.1:50051`
