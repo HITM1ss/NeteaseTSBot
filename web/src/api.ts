@@ -1,5 +1,27 @@
 const RAW_API_BASE = (import.meta as any).env?.VITE_API_BASE || '/api'
 const API_BASE = String(RAW_API_BASE).replace(/\/+$/, '')
+const RAW_API_TOKEN = (import.meta as any).env?.VITE_API_TOKEN || ''
+const API_TOKEN = String(RAW_API_TOKEN).trim()
+
+function buildHeaders(extraHeaders?: Record<string, string>, contentType?: string): Record<string, string> {
+  const headers: Record<string, string> = { ...(extraHeaders || {}) }
+
+  const hasAuthHeader = Object.keys(headers).some((key) => {
+    const lower = key.toLowerCase()
+    return lower === 'authorization' || lower === 'x-api-token'
+  })
+
+  if (API_TOKEN && !hasAuthHeader) {
+    headers.Authorization = `Bearer ${API_TOKEN}`
+  }
+
+  const hasContentType = Object.keys(headers).some((key) => key.toLowerCase() === 'content-type')
+  if (contentType && !hasContentType) {
+    headers['Content-Type'] = contentType
+  }
+
+  return headers
+}
 
 async function requestJson<T>(
   path: string,
@@ -36,7 +58,7 @@ export async function apiGet<T>(path: string, extraHeaders?: Record<string, stri
   return await requestJson<T>(
     path,
     {
-      headers: { ...(extraHeaders || {}) },
+      headers: buildHeaders(extraHeaders),
     },
   )
 }
@@ -46,7 +68,7 @@ export async function apiPost<T>(path: string, body: any, extraHeaders?: Record<
     path,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(extraHeaders || {}) },
+      headers: buildHeaders(extraHeaders, 'application/json'),
       body: JSON.stringify(body),
     },
   )
@@ -57,7 +79,7 @@ export async function apiPut<T>(path: string, body: any, extraHeaders?: Record<s
     path,
     {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...(extraHeaders || {}) },
+      headers: buildHeaders(extraHeaders, 'application/json'),
       body: JSON.stringify(body),
     },
   )
@@ -68,7 +90,7 @@ export async function apiDelete<T>(path: string, extraHeaders?: Record<string, s
     path,
     {
       method: 'DELETE',
-      headers: { ...(extraHeaders || {}) },
+      headers: buildHeaders(extraHeaders),
     },
   )
 }

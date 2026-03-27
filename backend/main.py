@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 import hashlib
+import hmac
 import os
 import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -41,6 +43,60 @@ voice = VoiceClient()
 @app.options("/{full_path:path}")
 async def options_handler():
     return {"message": "OK"}
+
+
+def _normalize_request_path(path: str) -> str:
+    normalized = (path or "/").rstrip("/")
+    return normalized or "/"
+
+
+def _get_request_api_token(request: Request) -> str:
+    auth = (request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (request.headers.get("x-api-token") or "").strip()
+
+
+def _path_requires_api_token(path: str) -> bool:
+    if not settings.get_api_tokens():
+        return False
+
+    normalized = _normalize_request_path(path)
+    if normalized in {"/", "/docs", "/redoc", "/openapi.json"}:
+        return False
+    if normalized.startswith("/docs/") or normalized.startswith("/redoc/"):
+        return False
+    if normalized == "/admin" or normalized.startswith("/admin/"):
+        return False
+    return True
+
+
+def _check_api_token(request: Request) -> str | None:
+    tokens = settings.get_api_tokens()
+    if not tokens:
+        return None
+
+    provided = _get_request_api_token(request)
+    if not provided:
+        return "missing api token"
+    if any(hmac.compare_digest(provided, token) for token in tokens):
+        return None
+    return "invalid api token"
+
+
+@app.middleware("http")
+async def api_token_middleware(request: Request, call_next):
+    if request.method == "OPTIONS" or not _path_requires_api_token(request.url.path):
+        return await call_next(request)
+
+    error = _check_api_token(request)
+    if error is not None:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": error},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
 
 _chat_task: asyncio.Task[None] | None = None
 _current_queue_item_id: int | None = None
@@ -93,6 +149,7 @@ class AddQQMusicQueueRequest(BaseModel):
     quality: str = "320"
     album_mid: str = ""
 
+
 class VolumeUpdateRequest(BaseModel):
     volume_percent: int
 
@@ -111,6 +168,25 @@ class AdminCookieSetRequest(BaseModel):
 
 class TSClientDescriptionRequest(BaseModel):
     description: str
+
+
+class ExternalPlayerActionRequest(BaseModel):
+    action: str
+
+
+class ExternalQueueRequest(BaseModel):
+    source: str = "netease"
+    keywords: str = ""
+    song_id: str = ""
+    song_mid: str = ""
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    album_mid: str = ""
+    duration_ms: int | None = None
+    cover_url: str = ""
+    quality: str = "320"
+    play_now: bool = False
 
 
 @app.on_event("startup")
@@ -484,6 +560,140 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
         session.close()
 
     await _play_queue_item_internal(item_id, requested_by="auto")
+
+
+def _serialize_queue_item(row: QueueItem) -> dict:
+    return {
+        "id": row.id,
+        "track_id": row.track_id,
+        "title": row.title,
+        "artist": row.artist,
+        "album": row.album,
+        "duration": row.duration / 1000.0 if row.duration else None,
+        "artwork": row.cover_url,
+        "source_url": row.source_url,
+    }
+
+
+def _serialize_history_item(row: HistoryItem) -> dict:
+    return {
+        "id": row.id,
+        "played_at": row.played_at.isoformat(),
+        "track_id": row.track_id,
+        "title": row.title,
+        "artist": row.artist,
+        "album": row.album,
+        "duration": row.duration / 1000.0 if row.duration else None,
+        "artwork": row.cover_url,
+        "source_url": row.source_url,
+        "requested_by": row.requested_by,
+    }
+
+
+def _coerce_positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _extract_netease_artist_names(song: dict) -> str:
+    artists = (song.get("ar") or song.get("artists") or [])
+    if not isinstance(artists, list):
+        return ""
+    names = [str((artist or {}).get("name") or "").strip() for artist in artists if isinstance(artist, dict)]
+    return ", ".join([name for name in names if name])
+
+
+def _extract_netease_album_fields(song: dict) -> tuple[str, str]:
+    album = song.get("al") or song.get("album") or {}
+    if isinstance(album, dict):
+        return (
+            str(album.get("name") or "").strip(),
+            str(album.get("picUrl") or album.get("pic_url") or "").strip(),
+        )
+    if isinstance(album, str):
+        return album.strip(), ""
+    return "", ""
+
+
+def _normalize_netease_song(song: dict) -> dict | None:
+    song_id = str(song.get("id") or "").strip()
+    if not song_id:
+        return None
+
+    album_name, artwork_url = _extract_netease_album_fields(song)
+    duration_ms = _coerce_positive_int(song.get("dt") or song.get("duration"))
+    return {
+        "source": "netease",
+        "track_id": f"netease:{song_id}",
+        "song_id": song_id,
+        "title": str(song.get("name") or song_id).strip(),
+        "artist": _extract_netease_artist_names(song),
+        "album": album_name,
+        "duration_ms": duration_ms,
+        "artwork_url": artwork_url,
+    }
+
+
+def _normalize_netease_search_items(data: dict) -> list[dict]:
+    songs = (((data or {}).get("result") or {}).get("songs") or [])
+    if not isinstance(songs, list):
+        return []
+
+    items: list[dict] = []
+    for song in songs:
+        if not isinstance(song, dict):
+            continue
+        normalized = _normalize_netease_song(song)
+        if normalized is not None:
+            items.append(normalized)
+    return items
+
+
+def _extract_qqmusic_artist_names(song: dict) -> str:
+    artists = (song.get("singer") or song.get("artists") or [])
+    if not isinstance(artists, list):
+        return ""
+    names = [str((artist or {}).get("name") or "").strip() for artist in artists if isinstance(artist, dict)]
+    return ", ".join([name for name in names if name])
+
+
+def _normalize_qqmusic_song(song: dict) -> dict | None:
+    song_mid = str(song.get("mid") or song.get("songmid") or "").strip()
+    if not song_mid:
+        return None
+
+    album = song.get("album") if isinstance(song.get("album"), dict) else {}
+    album_mid = str((album or {}).get("mid") or song.get("albummid") or "").strip()
+    album_name = str((album or {}).get("name") or song.get("albumname") or "").strip()
+    interval = _coerce_positive_int(song.get("interval"))
+    duration_ms = interval * 1000 if interval is not None else None
+    artwork_url = qqmusic.get_song_cover_image(album_mid) if album_mid else ""
+
+    return {
+        "source": "qqmusic",
+        "track_id": f"qqmusic:{song_mid}",
+        "song_mid": song_mid,
+        "title": str(song.get("name") or song_mid).strip(),
+        "artist": _extract_qqmusic_artist_names(song),
+        "album": album_name,
+        "album_mid": album_mid,
+        "duration_ms": duration_ms,
+        "artwork_url": artwork_url,
+    }
+
+
+def _normalize_qqmusic_search_items(songs: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    for song in songs:
+        if not isinstance(song, dict):
+            continue
+        normalized = _normalize_qqmusic_song(song)
+        if normalized is not None:
+            items.append(normalized)
+    return items
 
 
 @app.get("/voice/status")
@@ -1974,17 +2184,20 @@ def admin_set_cookie(
 
 
 @app.get("/admin/qr/key")
-async def admin_qr_key() -> dict:
+async def admin_qr_key(request: Request) -> dict:
+    _require_admin_token(request)
     return await netease.qr_key()
 
 
 @app.get("/admin/qr/create")
-async def admin_qr_create(key: str) -> dict:
+async def admin_qr_create(key: str, request: Request) -> dict:
+    _require_admin_token(request)
     return await netease.qr_create(key)
 
 
 @app.get("/admin/qr/check")
-async def admin_qr_check(key: str, session: Session = Depends(get_session)) -> dict:
+async def admin_qr_check(key: str, request: Request, session: Session = Depends(get_session)) -> dict:
+    _require_admin_token(request)
     data = await netease.qr_check(key)
     code = (data or {}).get("code")
     cookie = (data or {}).get("cookie") or ""
@@ -2130,19 +2343,7 @@ async def add_queue_qqmusic(req: AddQQMusicQueueRequest) -> dict:
 @app.get("/queue")
 def get_queue(session: Session = Depends(get_session)) -> list[dict]:
     rows = session.execute(select(QueueItem).order_by(QueueItem.id.asc())).scalars().all()
-    return [
-        {
-            "id": r.id,
-            "track_id": r.track_id,
-            "title": r.title,
-            "artist": r.artist,
-            "album": r.album,
-            "duration": r.duration / 1000.0 if r.duration else None,
-            "artwork": r.cover_url,
-            "source_url": r.source_url,
-        }
-        for r in rows
-    ]
+    return [_serialize_queue_item(row) for row in rows]
 
 
 @app.delete("/queue")
@@ -2207,21 +2408,7 @@ async def play_queue_item(item_id: int, session: Session = Depends(get_session))
 @app.get("/history")
 def history(session: Session = Depends(get_session)) -> list[dict]:
     rows = session.execute(select(HistoryItem).order_by(HistoryItem.id.desc()).limit(200)).scalars().all()
-    return [
-        {
-            "id": r.id,
-            "played_at": r.played_at.isoformat(),
-            "track_id": r.track_id,
-            "title": r.title,
-            "artist": r.artist,
-            "album": r.album,
-            "duration": r.duration / 1000.0 if r.duration else None,
-            "artwork": r.cover_url,
-            "source_url": r.source_url,
-            "requested_by": r.requested_by,
-        }
-        for r in rows
-    ]
+    return [_serialize_history_item(row) for row in rows]
 
 
 @app.post("/history/{history_id}/replay")
@@ -2267,6 +2454,261 @@ async def replay_from_history(
                 detail=f"Cannot replay '{hist_item.title}': {e.detail}"
             )
         raise
+
+
+@app.get("/external/status", tags=["External API"])
+async def external_status(session: Session = Depends(get_session)) -> dict:
+    status = await voice_status()
+    queue_items = get_queue(session=session)
+    status["queue_length"] = len(queue_items)
+    status["queue_preview"] = queue_items[:10]
+    return status
+
+
+@app.post("/external/player/action", tags=["External API"])
+async def external_player_action(req: ExternalPlayerActionRequest) -> dict:
+    action_aliases = {
+        "resume": "play",
+        "continue": "play",
+        "switch": "next",
+    }
+    action = action_aliases.get((req.action or "").strip().lower(), (req.action or "").strip().lower())
+    if action == "play":
+        return await voice_play()
+    if action == "pause":
+        return await voice_pause()
+    if action == "next":
+        return await voice_next()
+    if action == "previous":
+        return await voice_previous()
+    if action == "skip":
+        return await voice_skip()
+    raise HTTPException(status_code=400, detail="unsupported action")
+
+
+@app.put("/external/player/volume", tags=["External API"])
+async def external_set_player_volume(
+    req: VolumeUpdateRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    return await set_voice_volume(req, session=session)
+
+
+@app.post("/external/player/shuffle", tags=["External API"])
+async def external_set_player_shuffle(req: ShuffleRequest) -> dict:
+    return await voice_shuffle(req)
+
+
+@app.post("/external/player/repeat", tags=["External API"])
+async def external_set_player_repeat(req: RepeatRequest) -> dict:
+    return await voice_repeat(req)
+
+
+@app.get("/external/search", tags=["External API"])
+async def external_search(
+    keywords: str,
+    source: str = "netease",
+    limit: int = 20,
+    page: int = 1,
+) -> dict:
+    query = (keywords or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="keywords is empty")
+
+    provider = (source or "netease").strip().lower()
+    page = max(1, int(page))
+    limit = max(1, min(int(limit), 50))
+
+    if provider == "qqmusic":
+        songs = await qqmusic.search_songs_simple(query, limit=limit, page=page)
+        items = _normalize_qqmusic_search_items(songs)
+        return {
+            "source": provider,
+            "keywords": query,
+            "page": page,
+            "limit": limit,
+            "has_more": len(items) == limit,
+            "items": items,
+        }
+
+    if provider != "netease":
+        raise HTTPException(status_code=400, detail="unsupported source")
+
+    offset = (page - 1) * limit
+    result = await search(keywords=query, limit=limit, offset=offset)
+    raw = result.raw
+    total = _coerce_positive_int((((raw or {}).get("result") or {}).get("songCount")))
+    items = _normalize_netease_search_items(raw)
+    return {
+        "source": provider,
+        "keywords": query,
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "has_more": (offset + len(items)) < total if total is not None else len(items) == limit,
+        "items": items,
+    }
+
+
+@app.post("/external/queue", tags=["External API"])
+async def external_add_queue(req: ExternalQueueRequest) -> dict:
+    provider = (req.source or "netease").strip().lower()
+    keywords = (req.keywords or "").strip()
+    play_now = bool(req.play_now)
+
+    if provider == "netease":
+        song_id = (req.song_id or "").strip()
+        title = (req.title or "").strip()
+        artist = (req.artist or "").strip()
+        album = (req.album or "").strip()
+        cover_url = (req.cover_url or "").strip()
+        duration_ms = req.duration_ms
+
+        if not song_id:
+            if not keywords:
+                raise HTTPException(status_code=400, detail="song_id or keywords is required for netease")
+            result = await search(keywords=keywords, limit=1, offset=0)
+            items = _normalize_netease_search_items(result.raw)
+            if not items:
+                raise HTTPException(status_code=404, detail="netease song not found")
+            first = items[0]
+            song_id = str(first.get("song_id") or "").strip()
+            title = title or str(first.get("title") or song_id).strip()
+            artist = artist or str(first.get("artist") or "").strip()
+            album = album or str(first.get("album") or "").strip()
+            cover_url = cover_url or str(first.get("artwork_url") or "").strip()
+            duration_ms = duration_ms if duration_ms is not None else _coerce_positive_int(first.get("duration_ms"))
+
+        if song_id and (not title or not artist or not album or not cover_url or duration_ms is None):
+            detail = await netease.song_detail(song_id=song_id)
+            songs = (detail or {}).get("songs") or []
+            if isinstance(songs, list) and songs and isinstance(songs[0], dict):
+                normalized = _normalize_netease_song(songs[0])
+                if normalized is not None:
+                    title = title or str(normalized.get("title") or song_id).strip()
+                    artist = artist or str(normalized.get("artist") or "").strip()
+                    album = album or str(normalized.get("album") or "").strip()
+                    cover_url = cover_url or str(normalized.get("artwork_url") or "").strip()
+                    duration_ms = duration_ms if duration_ms is not None else _coerce_positive_int(normalized.get("duration_ms"))
+
+        if not song_id:
+            raise HTTPException(status_code=400, detail="song_id is empty")
+
+        item_id, trial = await _enqueue_netease_song(
+            song_id=song_id,
+            title=title or song_id,
+            artist=artist,
+            play_now=play_now,
+            requested_by="external_api",
+            album=album,
+            duration_ms=duration_ms,
+            artwork_url=cover_url,
+        )
+        return {
+            "ok": True,
+            "source": provider,
+            "queue_id": item_id,
+            "trial": trial,
+            "play_now": play_now,
+            "track": {
+                "source": provider,
+                "track_id": f"netease:{song_id}",
+                "song_id": song_id,
+                "title": title or song_id,
+                "artist": artist,
+                "album": album,
+                "duration_ms": duration_ms,
+                "artwork_url": cover_url,
+            },
+        }
+
+    if provider == "qqmusic":
+        song_mid = (req.song_mid or "").strip()
+        title = (req.title or "").strip()
+        artist = (req.artist or "").strip()
+        album = (req.album or "").strip()
+        album_mid = (req.album_mid or "").strip()
+        quality = (req.quality or "320").strip() or "320"
+        cover_url = (req.cover_url or "").strip()
+
+        if not song_mid:
+            if not keywords:
+                raise HTTPException(status_code=400, detail="song_mid or keywords is required for qqmusic")
+            songs = await qqmusic.search_songs_simple(keywords, limit=1, page=1)
+            items = _normalize_qqmusic_search_items(songs)
+            if not items:
+                raise HTTPException(status_code=404, detail="qqmusic song not found")
+            first = items[0]
+            song_mid = str(first.get("song_mid") or "").strip()
+            title = title or str(first.get("title") or song_mid).strip()
+            artist = artist or str(first.get("artist") or "").strip()
+            album = album or str(first.get("album") or "").strip()
+            album_mid = album_mid or str(first.get("album_mid") or "").strip()
+            cover_url = cover_url or str(first.get("artwork_url") or "").strip()
+
+        if not song_mid:
+            raise HTTPException(status_code=400, detail="song_mid is empty")
+        if not title:
+            raise HTTPException(status_code=400, detail="title is required for qqmusic")
+        if not cover_url and album_mid:
+            cover_url = qqmusic.get_song_cover_image(album_mid)
+
+        item_id, trial = await _enqueue_qqmusic_song(
+            song_mid=song_mid,
+            title=title,
+            artist=artist,
+            play_now=play_now,
+            requested_by="external_api",
+            quality=quality,
+            album_mid=album_mid,
+        )
+        return {
+            "ok": True,
+            "source": provider,
+            "queue_id": item_id,
+            "trial": trial,
+            "play_now": play_now,
+            "track": {
+                "source": provider,
+                "track_id": f"qqmusic:{song_mid}",
+                "song_mid": song_mid,
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "album_mid": album_mid,
+                "artwork_url": cover_url,
+                "quality": quality,
+            },
+        }
+
+    raise HTTPException(status_code=400, detail="unsupported source")
+
+
+@app.get("/external/queue", tags=["External API"])
+def external_get_queue(session: Session = Depends(get_session)) -> dict:
+    items = get_queue(session=session)
+    return {"count": len(items), "items": items}
+
+
+@app.delete("/external/queue", tags=["External API"])
+async def external_clear_queue(session: Session = Depends(get_session)) -> dict:
+    return await clear_queue(session=session)
+
+
+@app.delete("/external/queue/{item_id}", tags=["External API"])
+def external_delete_queue_item(item_id: int, session: Session = Depends(get_session)) -> dict:
+    return delete_queue_item(item_id=item_id, session=session)
+
+
+@app.post("/external/queue/{item_id}/play", tags=["External API"])
+async def external_play_queue_item(item_id: int, session: Session = Depends(get_session)) -> dict:
+    return await play_queue_item(item_id=item_id, session=session)
+
+
+@app.get("/external/history", tags=["External API"])
+def external_history(session: Session = Depends(get_session)) -> dict:
+    items = history(session=session)
+    return {"count": len(items), "items": items}
 
 
 # 网易云音乐扩展功能 API
@@ -2342,10 +2784,10 @@ async def netease_highquality_playlists(cat: str = "全部", limit: int = 20) ->
 
 
 @app.get("/netease/playlist/{playlist_id}/detail")
-async def netease_playlist_detail(playlist_id: str, request: Request) -> dict:
+async def netease_playlist_detail(playlist_id: str) -> dict:
     """歌单详情"""
     try:
-        cookie = _get_admin_cookie_or_none(request)
+        cookie = _get_admin_cookie_or_none()
         result = await netease.playlist_detail(playlist_id, cookie=cookie)
         return result
     except Exception as e:
@@ -2353,10 +2795,10 @@ async def netease_playlist_detail(playlist_id: str, request: Request) -> dict:
 
 
 @app.get("/netease/song/{song_id}/lyric")
-async def netease_song_lyric(song_id: str, request: Request) -> dict:
+async def netease_song_lyric(song_id: str) -> dict:
     """获取歌词"""
     try:
-        cookie = _get_admin_cookie_or_none(request)
+        cookie = _get_admin_cookie_or_none()
         result = await netease.lyric(song_id, cookie=cookie)
         return result
     except Exception as e:
@@ -2364,20 +2806,24 @@ async def netease_song_lyric(song_id: str, request: Request) -> dict:
 
 
 @app.get("/netease/recommend/playlists")
-async def netease_recommend_playlists(request: Request, limit: int = 30) -> dict:
+async def netease_recommend_playlists(limit: int = 30) -> dict:
     """推荐歌单"""
     try:
-        cookie = _get_admin_cookie_or_none(request)
+        cookie = _get_admin_cookie_or_none()
         result = await netease.personalized(limit=limit, cookie=cookie)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _get_admin_cookie_or_none(request: Request) -> str | None:
+def _get_admin_cookie_or_none() -> str | None:
     """获取管理员Cookie，如果不存在则返回None"""
     try:
-        return _get_admin_cookie(request)
+        session = new_session()
+        try:
+            return _get_admin_cookie(session)
+        finally:
+            session.close()
     except HTTPException:
         return None
 
@@ -2637,5 +3083,3 @@ async def qqmusic_refresh_login() -> dict:
         return await qqmusic.refresh_login()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-

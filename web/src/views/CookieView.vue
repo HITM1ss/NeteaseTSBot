@@ -322,6 +322,12 @@ let userTimer: number | null = null
 let adminTimer: number | null = null
 let qqAdminTimer: number | null = null
 
+function getAdminHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (adminToken.value.trim()) headers['x-admin-token'] = adminToken.value.trim()
+  return headers
+}
+
 async function load() {
   status.value = ''
   userCookie.value = localStorage.getItem(USER_COOKIE_KEY) || ''
@@ -329,9 +335,7 @@ async function load() {
   adminStatus.value = !!st?.admin_cookie_set
 
   try {
-    const headers: Record<string, string> = {}
-    if (adminToken.value.trim()) headers['x-admin-token'] = adminToken.value.trim()
-    const qst = await apiGet<{ admin_cookie_set: boolean }>('/admin/qqmusic/status', headers)
+    const qst = await apiGet<{ admin_cookie_set: boolean }>('/admin/qqmusic/status', getAdminHeaders())
     qqAdminStatus.value = !!qst?.admin_cookie_set
   } catch {
     qqAdminStatus.value = false
@@ -343,9 +347,7 @@ async function setAdminCookie() {
   try {
     const cookie = adminManualCookie.value
     if (!cookie.trim()) throw new Error('cookie is empty')
-    const headers: Record<string, string> = {}
-    if (adminToken.value.trim()) headers['x-admin-token'] = adminToken.value.trim()
-    await apiPost<any>('/admin/cookie', { cookie }, headers)
+    await apiPost<any>('/admin/cookie', { cookie }, getAdminHeaders())
     adminManualCookie.value = ''
     status.value = 'admin cookie saved server-side'
     await load()
@@ -406,9 +408,7 @@ async function checkQQAdminQr() {
       if (!authUrl) throw new Error('authorized but auth_url is empty')
 
       qqAdminAuthUrl.value = authUrl
-      const headers: Record<string, string> = {}
-      if (adminToken.value.trim()) headers['x-admin-token'] = adminToken.value.trim()
-      await apiPost<any>('/admin/qqmusic/qr/confirm', { auth_url: authUrl }, headers)
+      await apiPost<any>('/admin/qqmusic/qr/confirm', { auth_url: authUrl }, getAdminHeaders())
       status.value = 'qqmusic admin authorized (cookie saved server-side)'
       stopQQAdminPoll()
       await load()
@@ -426,9 +426,7 @@ async function setQQAdminCookie() {
   try {
     const cookie = qqAdminManualCookie.value
     if (!cookie.trim()) throw new Error('cookie is empty')
-    const headers: Record<string, string> = {}
-    if (adminToken.value.trim()) headers['x-admin-token'] = adminToken.value.trim()
-    await apiPost<any>('/admin/qqmusic/cookie', { cookie }, headers)
+    await apiPost<any>('/admin/qqmusic/cookie', { cookie }, getAdminHeaders())
     qqAdminManualCookie.value = ''
     status.value = 'qqmusic admin cookie saved server-side'
     await load()
@@ -523,12 +521,13 @@ async function startAdminQr() {
   try {
     stopAdminPoll()
     adminQrImg.value = ''
-    const keyRes = await apiGet<any>('/admin/qr/key')
+    const headers = getAdminHeaders()
+    const keyRes = await apiGet<any>('/admin/qr/key', headers)
     const key = keyRes?.data?.unikey || keyRes?.data?.key || keyRes?.unikey
     adminQrKey.value = String(key || '')
     if (!adminQrKey.value) throw new Error('failed to get admin qr key')
 
-    const createRes = await apiGet<any>(`/admin/qr/create?key=${encodeURIComponent(adminQrKey.value)}`)
+    const createRes = await apiGet<any>(`/admin/qr/create?key=${encodeURIComponent(adminQrKey.value)}`, headers)
     adminQrImg.value = String(createRes?.data?.qrimg || '')
 
     status.value = 'admin qr created'
@@ -542,7 +541,7 @@ async function checkAdminQr() {
   status.value = ''
   try {
     if (!adminQrKey.value) return
-    const r = await apiGet<any>(`/admin/qr/check?key=${encodeURIComponent(adminQrKey.value)}`)
+    const r = await apiGet<any>(`/admin/qr/check?key=${encodeURIComponent(adminQrKey.value)}`, getAdminHeaders())
     const code = Number(r?.code)
     if (code === 803) {
       status.value = 'admin authorized (cookie saved server-side)'

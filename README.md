@@ -57,6 +57,7 @@ TSBot 的目标是把边界重新划清：
 
 - `HOWTOSTART.md`（部署/运行指南）
 - `LOGGING.md`（统一日志系统）
+- `docs/API.md`（后端 API 详细文档）
 - `web/README.md`（前端详细说明）
 
 ## 系统要求
@@ -141,11 +142,13 @@ cp tsbot.env.example tsbot.env
 - `TSBOT_TS3_SERVER_PASSWORD` / `TSBOT_TS3_CHANNEL_PASSWORD` / `TSBOT_TS3_CHANNEL_PATH`
 - `TSBOT_TS3_IDENTITY` / `TSBOT_TS3_IDENTITY_FILE` / `TSBOT_TS3_AVATAR_DIR`
 - `TSBOT_ADMIN_TOKEN`：开启后端 admin 接口保护（请求头 `x-admin-token`）
+- `TSBOT_API_TOKEN` / `TSBOT_API_TOKENS`：为后端非 admin 接口开启共享 token 保护（支持 `Authorization: Bearer <token>` 或 `x-api-token`）
 - `TSBOT_WEB_HOST` / `TSBOT_WEB_PORT`：前端生产预览服务监听地址/端口（`run-web.sh` / `nohup-start.sh` 使用）
 - `TSBOT_WEB_API_PROXY_TARGET`：前端 dev / preview 代理到后端的目标地址（默认根据 `TSBOT_HOST` / `TSBOT_PORT` 推导）
 - `TSBOT_WEB_ALLOWED_HOSTS`：当你通过域名访问 Vite dev / preview 时允许的 host 白名单（逗号分隔）
 - `VITE_DEV_HOST` / `VITE_DEV_PORT`：前端本地 dev server 监听地址/端口
 - `VITE_API_BASE`：前端请求后端的 Base URL（推荐默认 `/api`，由 dev / preview / Docker 反向代理转发）
+- `VITE_API_TOKEN`：如果你启用了 `TSBOT_API_TOKEN` 且仍需要 Web 控制台访问后端，请把同一个 token 传给前端
 
 ### 2) 安装依赖
 
@@ -319,6 +322,24 @@ docker compose -f docker-compose.prebuilt.yml up -d
 
 - `http://127.0.0.1:8009/docs`
 
+## 外部 API Token
+
+如果你希望把 backend 暴露给外部脚本、面板或机器人调用，建议配置：
+
+- `TSBOT_API_TOKEN="<长随机字符串>"`：单个共享 token
+- 或 `TSBOT_API_TOKENS="token_a,token_b"`：多个 token（逗号或空白分隔）
+
+启用后，**非 `/admin/*` 的后端接口** 都需要携带 token，支持两种写法：
+
+- `Authorization: Bearer <token>`
+- `x-api-token: <token>`
+
+如果你同时还要继续使用 Web 控制台，需要在前端启动/构建时再配置：
+
+- `VITE_API_TOKEN="<与后端相同的 token>"`
+
+文档详见: `docs/API.md`
+
 ## 管理员登录态（网易云 / QQ 音乐）
 
 ### 网易云 Cookie
@@ -333,6 +354,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
 - `POST /admin/cookie`：写入 cookie
 - `GET /admin/status`：查看是否已设置
 - `GET /admin/account`：验证 cookie 是否有效
+- `GET /admin/qr/key` / `GET /admin/qr/create` / `GET /admin/qr/check`：管理员二维码登录
 
 前端也提供了设置入口（详见 `web/README.md`）。
 
