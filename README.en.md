@@ -295,11 +295,11 @@ TSBOT_IMAGE_TAG=v0.4.0 docker compose -f docker-compose.prebuilt.yml up -d
 
 # Switch to GHCR
 TSBOT_IMAGE_REGISTRY=ghcr.io \
-TSBOT_IMAGE_NAMESPACE=yumi118 \
+TSBOT_IMAGE_NAMESPACE=yichen11818 \
 docker compose -f docker-compose.prebuilt.yml up -d
 ```
 
-Image naming format (the current upstream owner / namespace is `yumi118`; forks can override via env vars):
+Image naming format (the Docker Hub namespace is `yumi118`; the current GitHub Packages / GHCR owner is `yichen11818`; forks can override via env vars):
 
 - `docker.io/<namespace>/neteasetsbot-backend:<tag>`
 - `docker.io/<namespace>/neteasetsbot-web:<tag>`
