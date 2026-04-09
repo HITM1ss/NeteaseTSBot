@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     api_tokens: str = ""
 
     admin_token: str = ""
+    bilibili_max_duration_minutes: int = 180
 
     def get_api_tokens(self) -> list[str]:
         tokens: list[str] = []

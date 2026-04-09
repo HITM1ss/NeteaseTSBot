@@ -12,6 +12,17 @@ class NeteaseClient:
     def __init__(self) -> None:
         self._base = settings.netease_api_base.rstrip("/")
 
+    def _ensure_pc_os_cookie(self, cookie: str | None) -> str | None:
+        if not cookie:
+            return cookie
+        c = cookie.strip()
+        if not c:
+            return None
+        if "os=" in c.lower():
+            return c
+        c = c.rstrip("; ")
+        return f"{c}; os=pc"
+
     async def _get(self, path: str, *, params: dict[str, Any] | None = None, cookie: str | None = None) -> dict[str, Any]:
         headers: dict[str, str] = {}
         if cookie:
@@ -37,6 +48,14 @@ class NeteaseClient:
         if br is not None:
             params["br"] = int(br)
         return await self._get("/song/url", params=params, cookie=cookie)
+
+    async def song_url_v1(self, song_id: str, level: str, cookie: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "id": song_id,
+            "level": level,
+            "timestamp": int(time.time() * 1000),
+        }
+        return await self._get("/song/url/v1", params=params, cookie=self._ensure_pc_os_cookie(cookie))
 
     async def song_detail(self, song_id: str, cookie: str | None = None) -> dict[str, Any]:
         return await self._get("/song/detail", params={"ids": song_id}, cookie=cookie)

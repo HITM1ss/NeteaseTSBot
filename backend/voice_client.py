@@ -84,6 +84,13 @@ class VoiceClient:
         assert self._pb2 is not None
         await stub.Resume(self._pb2.Empty())
 
+    async def seek(self, time_seconds: float) -> None:
+        stub = self._get_stub()
+        assert self._pb2 is not None
+        resp = await stub.Seek(self._pb2.SeekRequest(time=float(time_seconds)))
+        if not bool(getattr(resp, "ok", False)):
+            raise RuntimeError(str(getattr(resp, "message", "") or "seek failed"))
+
     async def stop(self) -> None:
         stub = self._get_stub()
         assert self._pb2 is not None

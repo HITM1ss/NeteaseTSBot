@@ -192,6 +192,21 @@ fn pick_avatar_file(dir: &Path) -> Option<PathBuf> {
     files.into_iter().next()
 }
 
+fn resolve_avatar_path_from_env() -> Option<PathBuf> {
+    let avatar_file = get_env("TSBOT_TS3_AVATAR_FILE", "");
+    let avatar_file = avatar_file.trim();
+    if !avatar_file.is_empty() {
+        return Some(resolve_repo_relative(avatar_file));
+    }
+
+    let avatar_dir = get_env("TSBOT_TS3_AVATAR_DIR", "");
+    let avatar_dir = avatar_dir.trim();
+    if avatar_dir.is_empty() {
+        return None;
+    }
+    Some(resolve_repo_relative(avatar_dir))
+}
+
 fn md5_hex_of_file(path: &Path) -> Result<String> {
     let bs = fs::read(path).map_err(|e| anyhow!("read avatar file failed: {e}"))?;
     let digest = md5::compute(&bs);
@@ -292,54 +307,8 @@ impl VoiceService for VoiceServiceImpl {
         req: Request<voicev1::PlayRequest>,
     ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
         let r = req.into_inner();
-
-        if !r.notice.is_empty() {
-            let _ = self.ts3_notice_tx.try_send((2, r.notice.clone()));
-        }
-
-        {
-            let mut st = self.status.lock().await;
-            st.now_playing_title = r.title.clone();
-            st.now_playing_source_url = r.source_url.clone();
-            st.state = 2; // STATE_PLAYING
-        }
-
-        // PlaybackEvent.Type: STARTED=1
-        emit_playback(&self.events_tx, 1, r.title.clone(), r.source_url.clone(), "");
-
-        self.stop_internal().await;
-
-        let (paused_tx, paused_rx) = watch::channel(false);
-        let cancel = CancellationToken::new();
-
-        let status = self.status.clone();
-        let tx = self.ts3_audio_tx.clone();
-        let events_tx = self.events_tx.clone();
-        let title = r.title.clone();
-        let source_url = r.source_url;
-        let cancel_child = cancel.clone();
-
-        let handle = tokio::spawn(async move {
-            let r = playback_loop(source_url.clone(), tx, paused_rx, cancel_child, status).await;
-            match r {
-                Ok(()) => {
-                    // PlaybackEvent.Type: FINISHED=2
-                    emit_playback(&events_tx, 2, title, source_url, "");
-                }
-                Err(e) => {
-                    error!(%e, "playback loop failed");
-                    // PlaybackEvent.Type: ERROR=3
-                    emit_playback(&events_tx, 3, title, source_url, format!("{e}"));
-                }
-            }
-        });
-
-        let mut pb = self.playback.lock().await;
-        *pb = Some(PlaybackControl {
-            cancel,
-            paused_tx,
-            handle,
-        });
+        self.start_playback_internal(r.title, r.source_url, r.notice, 0.0, false)
+            .await?;
 
         Ok(Response::new(voicev1::CommandResponse {
             ok: true,
@@ -472,6 +441,36 @@ impl VoiceService for VoiceServiceImpl {
         Ok(Response::new(voicev1::CommandResponse {
             ok: true,
             message: "ok".to_string(),
+        }))
+    }
+
+    async fn seek(
+        &self,
+        req: Request<voicev1::SeekRequest>,
+    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
+        let r = req.into_inner();
+        let target_time_s = if r.time.is_finite() {
+            r.time.max(0.0)
+        } else {
+            0.0
+        };
+
+        let (title, source_url, paused) = match self.current_playback_snapshot().await {
+            Some(snapshot) => snapshot,
+            None => {
+                return Ok(Response::new(voicev1::CommandResponse {
+                    ok: false,
+                    message: "no active playback".to_string(),
+                }));
+            }
+        };
+
+        self.start_playback_internal(title, source_url, String::new(), target_time_s, paused)
+            .await?;
+
+        Ok(Response::new(voicev1::CommandResponse {
+            ok: true,
+            message: format!("seeked to {target_time_s:.3}s"),
         }))
     }
 
@@ -631,6 +630,94 @@ impl VoiceService for VoiceServiceImpl {
 }
 
 impl VoiceServiceImpl {
+    async fn current_playback_snapshot(&self) -> Option<(String, String, bool)> {
+        let paused = {
+            let pb = self.playback.lock().await;
+            let control = pb.as_ref()?;
+            let paused = *control.paused_tx.borrow();
+            paused
+        };
+
+        let st = self.status.lock().await;
+        let source_url = st.now_playing_source_url.clone();
+        if source_url.is_empty() {
+            return None;
+        }
+        Some((st.now_playing_title.clone(), source_url, paused))
+    }
+
+    async fn start_playback_internal(
+        &self,
+        title: String,
+        source_url: String,
+        notice: String,
+        start_time_s: f64,
+        paused: bool,
+    ) -> std::result::Result<(), Status> {
+        if !notice.is_empty() {
+            let _ = self.ts3_notice_tx.try_send((2, notice));
+        }
+
+        self.stop_internal().await;
+
+        {
+            let mut st = self.status.lock().await;
+            st.now_playing_title = title.clone();
+            st.now_playing_source_url = source_url.clone();
+            st.state = if paused { 3 } else { 2 };
+        }
+
+        // PlaybackEvent.Type: STARTED=1
+        emit_playback(&self.events_tx, 1, title.clone(), source_url.clone(), "");
+
+        let (paused_tx, paused_rx) = watch::channel(paused);
+        let cancel = CancellationToken::new();
+
+        let status = self.status.clone();
+        let tx = self.ts3_audio_tx.clone();
+        let events_tx = self.events_tx.clone();
+        let title_for_event = title.clone();
+        let source_url_for_loop = source_url.clone();
+        let cancel_for_task = cancel.clone();
+
+        let handle = tokio::spawn(async move {
+            let r = playback_loop(
+                source_url_for_loop.clone(),
+                start_time_s,
+                tx,
+                paused_rx,
+                cancel_for_task.clone(),
+                status,
+            )
+            .await;
+            let was_cancelled = cancel_for_task.is_cancelled();
+            match r {
+                Ok(()) => {
+                    if !was_cancelled {
+                        // PlaybackEvent.Type: FINISHED=2
+                        emit_playback(&events_tx, 2, title_for_event, source_url_for_loop, "");
+                    }
+                }
+                Err(e) => {
+                    if was_cancelled {
+                        return;
+                    }
+                    error!(%e, "playback loop failed");
+                    // PlaybackEvent.Type: ERROR=3
+                    emit_playback(&events_tx, 3, title_for_event, source_url_for_loop, format!("{e}"));
+                }
+            }
+        });
+
+        let mut pb = self.playback.lock().await;
+        *pb = Some(PlaybackControl {
+            cancel,
+            paused_tx,
+            handle,
+        });
+        Ok(())
+    }
+
     async fn stop_internal(&self) {
         let mut pb = self.playback.lock().await;
         if let Some(p) = pb.take() {
@@ -903,13 +990,7 @@ async fn ts3_actor(
     let channel_id = get_env("TSBOT_TS3_CHANNEL_ID", "");
     let identity_str = get_env("TSBOT_TS3_IDENTITY", "");
     let identity_file = resolve_repo_relative(&get_env("TSBOT_TS3_IDENTITY_FILE", "./logs/identity.json"));
-    let avatar_dir = get_env("TSBOT_TS3_AVATAR_DIR", "");
-    let avatar_dir = avatar_dir.trim();
-    let avatar_dir = if avatar_dir.is_empty() {
-        None
-    } else {
-        Some(resolve_repo_relative(avatar_dir))
-    };
+    let avatar_path = resolve_avatar_path_from_env();
 
     let address = format!("{}:{}", host, port);
 
@@ -1071,39 +1152,45 @@ async fn ts3_actor(
                                     emit_log(&events_tx, 2, "ts3 connected");
 
                                     if !avatar_set_done {
-                                        if let Some(dir) = avatar_dir.as_ref() {
-                                            if dir.is_dir() {
-                                                if let Some(p) = pick_avatar_file(dir) {
-                                                    match fs::metadata(&p) {
-                                                        Ok(md) => {
-                                                            let size = md.len();
-                                                            match md5_hex_of_file(&p) {
-                                                                Ok(md5_hex) => {
-                                                                    let remote_path = format!("/avatar_{}", md5_hex);
-                                                                    match con.upload_file(ChannelId(0), &remote_path, None, size, true, false) {
-                                                                        Ok(h) => {
-                                                                            avatar_upload = Some(AvatarUploadState { handle: h, local_path: p.clone(), md5_hex: md5_hex.clone() });
-                                                                            emit_log(&events_tx, 2, format!("avatar upload started: {} -> {}", p.display(), remote_path));
-                                                                        }
-                                                                        Err(e) => {
-                                                                            emit_log(&events_tx, 3, format!("avatar upload start failed: {e}"));
-                                                                        }
+                                        if let Some(path) = avatar_path.as_ref() {
+                                            let avatar_file = if path.is_file() {
+                                                Some(path.clone())
+                                            } else if path.is_dir() {
+                                                pick_avatar_file(path)
+                                            } else {
+                                                None
+                                            };
+
+                                            if let Some(p) = avatar_file {
+                                                match fs::metadata(&p) {
+                                                    Ok(md) => {
+                                                        let size = md.len();
+                                                        match md5_hex_of_file(&p) {
+                                                            Ok(md5_hex) => {
+                                                                let remote_path = format!("/avatar_{}", md5_hex);
+                                                                match con.upload_file(ChannelId(0), &remote_path, None, size, true, false) {
+                                                                    Ok(h) => {
+                                                                        avatar_upload = Some(AvatarUploadState { handle: h, local_path: p.clone(), md5_hex: md5_hex.clone() });
+                                                                        emit_log(&events_tx, 2, format!("avatar upload started: {} -> {}", p.display(), remote_path));
+                                                                    }
+                                                                    Err(e) => {
+                                                                        emit_log(&events_tx, 3, format!("avatar upload start failed: {e}"));
                                                                     }
                                                                 }
-                                                                Err(e) => {
-                                                                    emit_log(&events_tx, 3, format!("avatar md5 failed: {e}"));
-                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                emit_log(&events_tx, 3, format!("avatar md5 failed: {e}"));
                                                             }
                                                         }
-                                                        Err(e) => {
-                                                            emit_log(&events_tx, 3, format!("avatar stat failed: {e}"));
-                                                        }
                                                     }
-                                                } else {
-                                                    emit_log(&events_tx, 3, format!("avatar dir has no supported images: {}", dir.display()));
+                                                    Err(e) => {
+                                                        emit_log(&events_tx, 3, format!("avatar stat failed: {e}"));
+                                                    }
                                                 }
+                                            } else if path.is_dir() {
+                                                emit_log(&events_tx, 3, format!("avatar dir has no supported images: {}", path.display()));
                                             } else {
-                                                emit_log(&events_tx, 3, format!("avatar dir not found: {}", dir.display()));
+                                                emit_log(&events_tx, 3, format!("avatar path not found: {}", path.display()));
                                             }
                                         }
                                     }
@@ -1375,26 +1462,41 @@ async fn ts3_actor(
 
 async fn playback_loop(
     source_url: String,
+    start_time_s: f64,
     ts3_audio_tx: mpsc::Sender<OutPacket>,
     mut paused_rx: watch::Receiver<bool>,
     cancel: CancellationToken,
     status: Arc<Mutex<SharedStatus>>,
 ) -> Result<()> {
     let playback_started = Instant::now();
-    info!(source_url = %source_url, "playback starting");
+    let start_time_s = if start_time_s.is_finite() {
+        start_time_s.max(0.0)
+    } else {
+        0.0
+    };
+    info!(source_url = %source_url, start_time_s = %format!("{start_time_s:.3}"), "playback starting");
 
-    let child = tokio::process::Command::new("ffmpeg")
+    let is_network_input = source_url.starts_with("http://") || source_url.starts_with("https://");
+    let mut ffmpeg = tokio::process::Command::new("ffmpeg");
+    ffmpeg
         .arg("-nostdin")
         .arg("-loglevel")
-        .arg("error")
-        .arg("-reconnect")
-        .arg("1")
-        .arg("-reconnect_streamed")
-        .arg("1")
-        .arg("-reconnect_delay_max")
-        .arg("5")
-        .arg("-rw_timeout")
-        .arg("15000000")
+        .arg("error");
+    if is_network_input {
+        ffmpeg
+            .arg("-reconnect")
+            .arg("1")
+            .arg("-reconnect_streamed")
+            .arg("1")
+            .arg("-reconnect_delay_max")
+            .arg("5")
+            .arg("-rw_timeout")
+            .arg("15000000");
+    }
+    if start_time_s > 0.0 {
+        ffmpeg.arg("-ss").arg(format!("{start_time_s:.3}"));
+    }
+    let child = ffmpeg
         .arg("-i")
         .arg(&source_url)
         .arg("-f")
@@ -1928,4 +2030,3 @@ async fn main() -> Result<()> {
     info!("Voice service shutdown complete");
     Ok(())
 }
-
