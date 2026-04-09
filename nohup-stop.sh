@@ -36,7 +36,7 @@ stop_one() {
     local count=0
     while kill -0 "$pid" 2>/dev/null && [[ $count -lt 10 ]]; do
       sleep 1
-      ((count++))
+      count=$((count + 1))
     done
 
     if kill -0 "$pid" 2>/dev/null; then
