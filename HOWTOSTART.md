@@ -270,6 +270,11 @@ TSBOT_TS3_IDENTITY_FILE=./logs/identity.json
 # TSBOT_TS3_CHANNEL_PATH=/Music
 # TSBOT_TS3_SERVER_PASSWORD=
 # TSBOT_TS3_CHANNEL_PASSWORD=
+# TSBOT_TS3_ALLOW_DIRECT_CLIENTUPDATE_DESCRIPTION=1
+# TSBOT_TS3_CLIENT_DESCRIPTION_TITLE=Yumi TSBot
+# TSBOT_TS3_CLIENT_DESCRIPTION_INTRO=TeamSpeak 音乐机器人\n支持网易云 / QQ 音乐
+# TSBOT_TS3_AVATAR_FILE=./assets/avatar.png
+# TSBOT_TS3_AVATAR_DIR=./assets/avatars
 
 # 后端服务配置
 TSBOT_HOST=127.0.0.1
@@ -289,6 +294,9 @@ VITE_DEV_PORT=5173
 
 # 前端 API Base（推荐默认 /api，由 dev / preview / Docker 反向代理到 backend）
 VITE_API_BASE=/api
+# VITE_WEB_PUBLIC_URL=https://music.example.com
+# VITE_WEB_APP_NAME=Yumi TSBot
+# VITE_WEB_APP_ICON=/favicon.ico
 
 # 日志配置
 TSBOT_LOG_LEVEL=INFO

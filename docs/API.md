@@ -83,6 +83,11 @@ x-netease-cookie: <cookie字符串>
 | --- | --- | --- |
 | `id` | integer | 队列项 ID |
 | `track_id` | string | 媒体标识，例如 `netease:123456`、`qqmusic:003abc` |
+| `source` | string | 统一来源标识，例如 `netease`、`qqmusic`、`bilibili` |
+| `song_id` | string | 网易云歌曲 ID，仅 `netease` 时返回 |
+| `song_mid` | string | QQ 音乐歌曲 MID，仅 `qqmusic` 时返回 |
+| `video_id` | string | B 站视频 ID，仅 `bilibili` 时返回 |
+| `webpage_url` | string | 原始视频页，仅 `bilibili` 时返回 |
 | `title` | string | 标题 |
 | `artist` | string | 艺术家 |
 | `album` | string | 专辑名 |
@@ -99,6 +104,11 @@ x-netease-cookie: <cookie字符串>
 | `id` | integer | 历史记录 ID |
 | `played_at` | string | ISO 8601 时间 |
 | `track_id` | string | 媒体标识 |
+| `source` | string | 统一来源标识 |
+| `song_id` | string | 网易云歌曲 ID，仅 `netease` 时返回 |
+| `song_mid` | string | QQ 音乐歌曲 MID，仅 `qqmusic` 时返回 |
+| `video_id` | string | B 站视频 ID，仅 `bilibili` 时返回 |
+| `webpage_url` | string | 原始视频页，仅 `bilibili` 时返回 |
 | `title` | string | 标题 |
 | `artist` | string | 艺术家 |
 | `album` | string | 专辑名 |
@@ -135,13 +145,14 @@ x-netease-cookie: <cookie字符串>
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/external/status` | 获取播放状态和队列预览 |
-| `GET` | `/external/search` | 统一搜索网易云或 QQ 音乐 |
+| `GET` | `/external/search` | 统一搜索网易云、QQ 音乐或 B 站视频 |
 | `POST` | `/external/queue` | 根据 ID 或关键词加入队列，可选立即播放 |
 | `GET` | `/external/queue` | 获取队列 |
 | `DELETE` | `/external/queue` | 清空队列并尝试停止播放 |
 | `DELETE` | `/external/queue/{item_id}` | 删除单个队列项 |
 | `POST` | `/external/queue/{item_id}/play` | 播放指定队列项 |
 | `GET` | `/external/history` | 获取历史播放记录 |
+| `POST` | `/external/history/{history_id}/replay` | 通过历史记录重新加入队列或立即播放 |
 | `POST` | `/external/player/action` | 播放、暂停、切歌等控制 |
 | `PUT` | `/external/player/volume` | 设置音量 |
 | `POST` | `/external/player/shuffle` | 开关随机播放 |
@@ -184,7 +195,7 @@ x-netease-cookie: <cookie字符串>
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `keywords` | string | 是 | 搜索关键词 |
-| `source` | string | 否 | `netease` 或 `qqmusic`，默认 `netease` |
+| `source` | string | 否 | `netease`、`qqmusic` 或 `bilibili`，默认 `netease` |
 | `limit` | integer | 否 | 默认 `20`，最大 `50` |
 | `page` | integer | 否 | 页码，从 `1` 开始 |
 
@@ -200,6 +211,13 @@ QQ 音乐示例：
 ```bash
 curl -H "Authorization: Bearer <token>" \
   "http://127.0.0.1:8009/external/search?source=qqmusic&keywords=林俊杰"
+```
+
+B 站示例：
+
+```bash
+curl -H "Authorization: Bearer <token>" \
+  "http://127.0.0.1:8009/external/search?source=bilibili&keywords=周杰伦"
 ```
 
 统一返回结构：
@@ -229,6 +247,15 @@ curl -H "Authorization: Bearer <token>" \
 
 QQ 音乐 `items` 里会使用 `song_mid` / `album_mid` 字段。
 
+B 站 `items` 里会使用 `video_id` / `webpage_url` 字段。
+
+当 `source=bilibili` 时，返回项还会尽量补充：
+
+- `description`：视频简介摘要
+- `likes`：点赞数
+- `favorites`：收藏数
+- `coins`：投币数
+
 ### 4.4 `POST /external/queue`
 
 用于外部点歌。支持两种模式：
@@ -240,16 +267,18 @@ QQ 音乐 `items` 里会使用 `song_mid` / `album_mid` 字段。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `source` | string | 否 | `netease` 或 `qqmusic`，默认 `netease` |
+| `source` | string | 否 | `netease`、`qqmusic` 或 `bilibili`，默认 `netease` |
 | `keywords` | string | 否 | 按关键词自动搜索第一条 |
 | `song_id` | string | 否 | 网易云歌曲 ID |
 | `song_mid` | string | 否 | QQ 音乐歌曲 MID |
+| `video_id` | string | 否 | B 站视频 BV 号或 av 号 |
 | `title` | string | 否 | 标题，可不传，后端尽量补全 |
 | `artist` | string | 否 | 艺术家，可不传 |
 | `album` | string | 否 | 专辑名，可不传 |
 | `album_mid` | string | 否 | QQ 音乐专辑 MID |
 | `duration_ms` | integer | 否 | 毫秒 |
 | `cover_url` | string | 否 | 封面图 URL |
+| `level` | string | 否 | 网易云音质等级，默认 `auto` |
 | `quality` | string | 否 | QQ 音乐音质，默认 `320` |
 | `play_now` | boolean | 否 | 是否立即播放，默认 `false` |
 
@@ -257,7 +286,10 @@ QQ 音乐 `items` 里会使用 `song_mid` / `album_mid` 字段。
 
 - 网易云至少需要 `song_id` 或 `keywords` 之一
 - QQ 音乐至少需要 `song_mid` 或 `keywords` 之一
+- B 站至少需要 `video_id` 或 `keywords` 之一
+- 网易云 `level` 支持：`auto`、`standard`、`higher`、`exhigh`、`lossless`、`hires`、`jyeffect`、`sky`、`dolby`、`jymaster`
 - QQ 音乐实际入队和播放依赖服务端已配置管理员 QQ 音乐 cookie
+- B 站播放时会由后端下载音频到本地缓存后，再交给 `voice-service` 播放
 
 按关键词直接播放示例：
 
@@ -268,6 +300,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
   -d '{
     "source": "netease",
     "keywords": "稻香",
+    "level": "lossless",
     "play_now": true
   }'
 ```
@@ -285,6 +318,21 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
     "artist": "林俊杰",
     "album_mid": "001fNHEf1SFEFN",
     "play_now": false
+  }'
+```
+
+按 B 站视频立即播放示例：
+
+```bash
+curl -X POST "http://127.0.0.1:8009/external/queue" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "bilibili",
+    "video_id": "BV1QQSDBWEGn",
+    "title": "【HiRes无损】周杰伦-太阳之子整张专辑 含歌词和单曲 共13首",
+    "artist": "太阳之子周杰伦专辑",
+    "play_now": true
   }'
 ```
 
@@ -356,7 +404,24 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 }
 ```
 
-### 4.10 `POST /external/player/action`
+`items` 的元素结构见“HistoryItem”。
+
+### 4.10 `POST /external/history/{history_id}/replay`
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `play_now` | boolean | 否 | 默认 `true`；`false` 时只加入队列不立即播放 |
+
+说明：
+
+- 会根据历史项的 `track_id` 自动识别来源
+- 目前支持 `netease:*`、`qqmusic:*`、`bilibili:*`
+- 网易云和 QQ 音乐会重新获取最新播放地址
+- B 站会重新解析视频信息，并在需要时重新准备本地缓存音频
+
+### 4.11 `POST /external/player/action`
 
 请求体：
 
@@ -382,7 +447,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 - `next` 更偏向“切到下一首”
 - `skip` 会删除当前正在播放的队列项，再自动播放下一首
 
-### 4.11 `PUT /external/player/volume`
+### 4.12 `PUT /external/player/volume`
 
 请求体：
 
@@ -394,7 +459,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 
 范围会被后端强制裁剪到 `0..200`。
 
-### 4.12 `POST /external/player/shuffle`
+### 4.13 `POST /external/player/shuffle`
 
 请求体：
 
@@ -404,7 +469,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 }
 ```
 
-### 4.13 `POST /external/player/repeat`
+### 4.14 `POST /external/player/repeat`
 
 请求体：
 
@@ -435,7 +500,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | `POST` | `/voice/next` | 下一首 |
 | `POST` | `/voice/skip` | 跳过当前曲目并删除队列项 |
 | `POST` | `/voice/previous` | 上一首 |
-| `POST` | `/voice/seek` | 预留 seek，目前未真正实现 |
+| `POST` | `/voice/seek` | 调整当前播放进度 |
 | `POST` | `/voice/shuffle` | 随机播放开关 |
 | `POST` | `/voice/repeat` | 循环模式 |
 
@@ -480,15 +545,20 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 }
 ```
 
-当前实现会返回：
+成功响应示例：
 
 ```json
 {
   "ok": true,
-  "message": "Seek not implemented",
   "time": 120.0
 }
 ```
+
+说明：
+
+- `time` 单位为秒
+- 如果后端已知当前曲目的总时长，会自动将目标进度限制在 `0 ~ duration`
+- 对网易云和 QQ 音乐都会通过 `voice-service` 重新从对应偏移启动解码
 
 ## 6. 队列与历史接口
 
@@ -496,6 +566,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | --- | --- | --- |
 | `POST` | `/queue/netease` | 网易云歌曲入队 |
 | `POST` | `/queue/qqmusic` | QQ 音乐歌曲入队 |
+| `POST` | `/queue/bilibili` | B 站视频入队并在播放时下载音频 |
 | `GET` | `/queue` | 获取队列 |
 | `DELETE` | `/queue` | 清空队列 |
 | `POST` | `/queue` | 通用低层入队 |
@@ -510,15 +581,22 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 
 ```json
 {
-  "song_id": "123456",
-  "title": "稻香",
-  "artist": "周杰伦",
-  "album": "魔杰座",
-  "duration_ms": 223000,
-  "cover_url": "https://...",
-  "play_now": true
+    "song_id": "123456",
+    "title": "稻香",
+    "artist": "周杰伦",
+    "album": "魔杰座",
+    "duration_ms": 223000,
+    "cover_url": "https://...",
+    "level": "lossless",
+    "play_now": true
 }
 ```
+
+说明：
+
+- `level` 默认为 `auto`
+- `auto` 会优先请求尽可能高的可播放音质
+- 指定更高音质时，上游 `/song/url/v1` 会按歌曲和账号能力返回实际可用的 `level` / `br`
 
 响应：
 
@@ -541,11 +619,33 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
   "artist": "林俊杰",
   "play_now": true,
   "quality": "320",
-  "album_mid": "001fNHEf1SFEFN"
+  "album_mid": "001fNHEf1SFEFN",
+  "duration_ms": 269000
 }
 ```
 
-### 6.3 `POST /queue`
+### 6.3 `POST /queue/bilibili`
+
+请求体：
+
+```json
+{
+  "video_id": "BV1QQSDBWEGn",
+  "title": "【HiRes无损】周杰伦-太阳之子整张专辑 含歌词和单曲 共13首",
+  "artist": "太阳之子周杰伦专辑",
+  "album": "音乐综合",
+  "duration_ms": 6555000,
+  "cover_url": "https://i0.hdslb.com/...",
+  "play_now": true
+}
+```
+
+说明：
+
+- `video_id` 支持 BV 号、av 号，或包含这两者的 B 站视频 URL
+- 实际播放前会先将音频下载到服务端本地缓存，再交给 `voice-service`
+
+### 6.4 `POST /queue`
 
 这是最底层的通用入队接口，不会帮你解析平台歌曲信息。请求体：
 
@@ -558,7 +658,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 }
 ```
 
-### 6.4 `POST /history/{history_id}/replay`
+### 6.5 `POST /history/{history_id}/replay`
 
 查询参数：
 
@@ -568,8 +668,9 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 
 说明：
 
-- 目前只支持重播网易云历史记录
-- 会重新解析新的播放 URL，而不是重用旧 URL
+- 支持 `netease:*`、`qqmusic:*`、`bilibili:*` 三类历史记录
+- 会重新解析新的播放 URL / 本地缓存，而不是重用旧 URL
+- QQ 音乐历史重播仍依赖服务端已配置的管理员 QQ 音乐 cookie
 
 ## 7. 通用搜索与歌词接口
 
@@ -678,10 +779,47 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `id` | string | 是 | 歌曲 ID |
+| `level` | string | 否 | 默认 `auto`，支持 `auto`、`standard`、`higher`、`exhigh`、`lossless`、`hires`、`jyeffect`、`sky`、`dolby`、`jymaster` |
 
-## 9. QQ 音乐接口 `/qqmusic/*`
+响应会额外返回：
 
-### 9.1 搜索与内容接口
+- `requested_level`：本次请求的标准化音质
+- `level`：上游实际返回的音质等级
+- `br`：上游实际返回的码率
+
+## 9. B 站接口 `/bilibili/*`
+
+### 9.1 搜索接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/bilibili/search/videos` | 搜索 B 站视频，返回统一后的结果结构 |
+
+关键参数：
+
+| 路径 | 参数 | 说明 |
+| --- | --- | --- |
+| `/bilibili/search/videos` | `keywords` | 搜索词 |
+| `/bilibili/search/videos` | `limit` | 默认 `20`，最大 `50` |
+| `/bilibili/search/videos` | `page` | 默认 `1` |
+
+返回项里的核心字段：
+
+- `video_id`：BV 号或 av 号
+- `title`：视频标题
+- `artist`：UP 主名称
+- `album`：视频分区或分类
+- `description`：简介摘要
+- `duration_ms`：时长，毫秒
+- `artwork_url`：封面 URL
+- `likes`：点赞数
+- `favorites`：收藏数
+- `coins`：投币数
+- `webpage_url`：原始 B 站视频页
+
+## 10. QQ 音乐接口 `/qqmusic/*`
+
+### 10.1 搜索与内容接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -710,7 +848,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | `/qqmusic/song/{song_mid}/url` | `quality` | 默认 `320` |
 | `/qqmusic/song/{song_mid}/lyric` | `parse` | `true` 时返回解析后的结构 |
 
-### 9.2 登录与用户态接口
+### 10.2 登录与用户态接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -743,9 +881,9 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 - `/qqmusic/login/cookie` 只把 cookie 写进当前进程内的 QQ 音乐客户端状态，不会持久化到数据库
 - 如果你要长期保存管理员 QQ 音乐 cookie，应该使用 `/admin/qqmusic/*`
 
-## 10. 管理接口 `/admin/*`
+## 11. 管理接口 `/admin/*`
 
-### 10.1 网易云管理员接口
+### 11.1 网易云管理员接口
 
 | 方法 | 路径 | 是否需要 admin token | 说明 |
 | --- | --- | --- | --- |
@@ -783,7 +921,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | --- | --- | --- | --- |
 | `id` | string | 是 | 网易云歌曲 ID |
 
-### 10.2 QQ 音乐管理员接口
+### 11.2 QQ 音乐管理员接口
 
 | 方法 | 路径 | 是否需要 admin token | 说明 |
 | --- | --- | --- | --- |
@@ -807,9 +945,9 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 }
 ```
 
-## 11. 常见调用流程
+## 12. 常见调用流程
 
-### 11.1 外部机器人接入推荐流程
+### 12.1 外部机器人接入推荐流程
 
 1. 配置 `TSBOT_API_TOKEN`
 2. 调用 `/external/search`
@@ -817,7 +955,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 4. 轮询 `/external/status`
 5. 需要切歌时调用 `/external/player/action`
 
-### 11.2 Web 控制台继续可用的配置
+### 12.2 Web 控制台继续可用的配置
 
 如果你开启了 `TSBOT_API_TOKEN`，又还要继续使用前端：
 
@@ -825,7 +963,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 2. 前端构建前设置 `VITE_API_TOKEN`
 3. 如果还要用管理员操作，再设置 `TSBOT_ADMIN_TOKEN`
 
-### 11.3 需要更稳定的网易云和 QQ 音乐播放链接
+### 12.3 需要更稳定的网易云和 QQ 音乐播放链接
 
 建议额外配置：
 
@@ -838,7 +976,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 - 播放 VIP / 试听 / 登录态相关资源
 - 拉取部分用户歌单或用户信息
 
-## 12. 错误码与注意事项
+## 13. 错误码与注意事项
 
 常见 HTTP 状态：
 
@@ -855,6 +993,5 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 
 额外说明：
 
-- `/voice/seek` 目前只是占位接口
 - 上游网易云和 QQ 音乐部分接口返回结构较复杂，某些 `/netease/*` 和 `/qqmusic/*` 路由会直接返回上游原始结构
 - 如果你只是做外部控制集成，优先使用 `/external/*`

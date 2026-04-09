@@ -17,7 +17,9 @@ TSBot 是一个基于 TeamSpeak 的音乐机器人；`voice-service` 主客户�
 - **播放队列/控制**（暂停/继续/下一首/上一首、音量、随机/循环等）
 - **网易云音乐搜索/歌单/喜欢/歌词**（通过外部 `NeteaseCloudMusicApi` 服务）
 - **QQ 音乐搜索/歌单/歌词/播放链接**（后端内建适配，登录态能力可通过 Web 控制台配置）
-- **Web 控制台**（Vue3 前端，用于搜索/队列/歌词/设置）
+- **B 站视频搜索与音频播放**（支持搜索视频、展示简介/点赞/收藏/投币，并在播放时缓存音频）
+- **Web 控制台**（Vue3 前端，用于搜索/队列/最近播放/本地收藏/歌词/设置）
+- **外部集成 API**（`/external/*` 提供统一搜索、入队、状态读取、历史读取与历史重播）
 ![预览图](docs/1.png)
 ![预览图](docs/2.png)
 ![预览图](docs/3.png)
@@ -87,6 +89,7 @@ TSBot 的目标是把边界重新划清：
 - `voice-service` 的主客户端连接路径已经适配 TeamSpeak 服务器登录、进频道、收发文字消息和音频播放，当前可用于 TS3/TS6 服务器。
 - 为兼容旧配置，环境变量名仍保持为 `TSBOT_TS3_*`，但它们同样用于 TS6 的主客户端连接。
 - 代码中仍保留一条可选的 legacy `ServerQuery` fallback，仅用于旧式 `client_description` 更新；它不是 TS6 的 HTTP(S) Query 接口。
+- 如果你希望 bot 直接以“模拟客户端”的方式更新自己的简介，可在环境变量中开启 `TSBOT_TS3_ALLOW_DIRECT_CLIENTUPDATE_DESCRIPTION=1`。
 
 ## 网易云音乐支持（可选，依赖 `NeteaseCloudMusicApi`）
 
@@ -117,6 +120,15 @@ QQ 音乐能力由后端直接提供，不需要额外部署独立的 QQ 音乐 
 - 播放链接、用户歌单等依赖登录态的能力，通常需要管理员 QQ 音乐 Cookie。
 - 管理员可以通过 Web 控制台扫码登录，或调用 `/admin/qqmusic/*` 接口写入/确认 Cookie。
 
+## B 站支持（内建）
+
+B 站能力由后端直接适配，不需要额外部署独立 API 服务。
+
+- 支持搜索 B 站视频，并返回统一后的标题、UP 主、分区、简介、点赞、收藏、投币、封面和原视频链接。
+- 支持按 `BV` / `av` / 视频 URL 入队。
+- 实际播放时，后端会先把音频下载到本地缓存，再交给 `voice-service` 播放。
+- 可通过 `TSBOT_BILIBILI_MAX_DURATION_MINUTES` 限制允许点播的最长视频时长，避免超长视频拖垮播放链路。
+
 ## 快速开始（推荐）
 
 ### 1) 配置环境变量
@@ -140,7 +152,10 @@ cp tsbot.env.example tsbot.env
 可选：
 
 - `TSBOT_TS3_SERVER_PASSWORD` / `TSBOT_TS3_CHANNEL_PASSWORD` / `TSBOT_TS3_CHANNEL_PATH`
-- `TSBOT_TS3_IDENTITY` / `TSBOT_TS3_IDENTITY_FILE` / `TSBOT_TS3_AVATAR_DIR`
+- `TSBOT_TS3_IDENTITY` / `TSBOT_TS3_IDENTITY_FILE`
+- `TSBOT_TS3_ALLOW_DIRECT_CLIENTUPDATE_DESCRIPTION`：允许 bot 直接通过客户端自身更新 `client_description`
+- `TSBOT_TS3_CLIENT_DESCRIPTION_TITLE` / `TSBOT_TS3_CLIENT_DESCRIPTION_INTRO`：配置频道内显示的简介标题和介绍正文（支持 `\n`）
+- `TSBOT_TS3_AVATAR_FILE` / `TSBOT_TS3_AVATAR_DIR`：配置 bot 客户端头像
 - `TSBOT_ADMIN_TOKEN`：开启后端 admin 接口保护（请求头 `x-admin-token`）
 - `TSBOT_API_TOKEN` / `TSBOT_API_TOKENS`：为后端非 admin 接口开启共享 token 保护（支持 `Authorization: Bearer <token>` 或 `x-api-token`）
 - `TSBOT_WEB_HOST` / `TSBOT_WEB_PORT`：前端生产预览服务监听地址/端口（`run-web.sh` / `nohup-start.sh` 使用）
@@ -148,6 +163,9 @@ cp tsbot.env.example tsbot.env
 - `TSBOT_WEB_ALLOWED_HOSTS`：当你通过域名访问 Vite dev / preview 时允许的 host 白名单（逗号分隔）
 - `VITE_DEV_HOST` / `VITE_DEV_PORT`：前端本地 dev server 监听地址/端口
 - `VITE_API_BASE`：前端请求后端的 Base URL（推荐默认 `/api`，由 dev / preview / Docker 反向代理转发）
+- `VITE_WEB_PUBLIC_URL`：网页公网 URL（用于页面 canonical / og:url，也会补充到 allowedHosts）
+- `VITE_WEB_APP_NAME`：网页显示名称（浏览器标题、侧边栏品牌）
+- `VITE_WEB_APP_ICON`：网页 icon / favicon URL
 - `VITE_API_TOKEN`：如果你启用了 `TSBOT_API_TOKEN` 且仍需要 Web 控制台访问后端，请把同一个 token 传给前端
 
 ### 2) 安装依赖
@@ -339,6 +357,14 @@ docker compose -f docker-compose.prebuilt.yml up -d
 - `VITE_API_TOKEN="<与后端相同的 token>"`
 
 文档详见: `docs/API.md`
+
+推荐外部集成优先使用稳定的 `/external/*` 路由，而不是直接依赖前端内部用的细碎接口。常用能力包括：
+
+- `/external/status`：读取当前播放状态和队列预览
+- `/external/search`：统一搜索 `netease` / `qqmusic` / `bilibili`
+- `/external/queue`：按 ID 或关键词点歌
+- `/external/history`：读取最近播放
+- `/external/history/{history_id}/replay`：按历史记录重新加入队列或立即播放
 
 ## 管理员登录态（网易云 / QQ 音乐）
 
