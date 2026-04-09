@@ -8,6 +8,7 @@ import {
   Trash2,
   Play,
   Plus,
+  ExternalLink,
 } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
@@ -15,6 +16,7 @@ import { apiPost } from '../api'
 import { useTransientMessage } from '../composables/useTransientMessage'
 import { buildNeteaseQueuePayload } from '../utils/queue'
 import {
+  getFavoriteSongKey,
   getFavoritePlaylists,
   getFavoriteSongs,
   removeFavoritePlaylist,
@@ -53,8 +55,61 @@ function formatDuration(durationMs?: number): string {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
 }
 
+function isBilibiliSong(song: FavoriteSong): boolean {
+  return song.source === 'bilibili' || String(song.track_id || '').startsWith('bilibili:') || !!song.video_id
+}
+
+function getSongArtists(song: FavoriteSong): string {
+  if (song.artist) return song.artist
+  return (song.ar || []).map((artist) => artist.name).join(', ')
+}
+
+function getSongAlbum(song: FavoriteSong): string {
+  return song.album || song.al?.name || ''
+}
+
+function getSongArtwork(song: FavoriteSong): string {
+  return song.artwork_url || song.al?.picUrl || ''
+}
+
+function getSongWebpageUrl(song: FavoriteSong): string {
+  return song.webpage_url || ''
+}
+
+function getSongSourceLabel(song: FavoriteSong): string {
+  if (isBilibiliSong(song)) return 'B站'
+  if (song.source === 'qqmusic') return 'QQ音乐'
+  return '网易云'
+}
+
+function getBilibiliVideoId(song: FavoriteSong): string {
+  const raw = String(song.video_id || song.track_id || song.webpage_url || '').trim()
+  const match = raw.match(/(BV[0-9A-Za-z]+|av\d+)/i)
+  if (!match) return ''
+  const token = match[1]
+  return token.toLowerCase().startsWith('bv') ? `BV${token.slice(2)}` : token.toLowerCase()
+}
+
 async function playSong(song: FavoriteSong) {
   try {
+    if (isBilibiliSong(song)) {
+      const videoId = getBilibiliVideoId(song)
+      if (!videoId) {
+        throw new Error('未找到 B 站视频 ID')
+      }
+
+      await apiPost('/queue/bilibili', {
+        video_id: videoId,
+        title: song.name,
+        artist: getSongArtists(song),
+        album: getSongAlbum(song),
+        play_now: true,
+        cover_url: getSongArtwork(song),
+        duration_ms: song.dt,
+      })
+      return
+    }
+
     await apiPost('/queue/netease', buildNeteaseQueuePayload(song, true))
   } catch (e: any) {
     const msg = String(e?.message ?? e)
@@ -64,6 +119,24 @@ async function playSong(song: FavoriteSong) {
 
 async function addToQueue(song: FavoriteSong) {
   try {
+    if (isBilibiliSong(song)) {
+      const videoId = getBilibiliVideoId(song)
+      if (!videoId) {
+        throw new Error('未找到 B 站视频 ID')
+      }
+
+      await apiPost('/queue/bilibili', {
+        video_id: videoId,
+        title: song.name,
+        artist: getSongArtists(song),
+        album: getSongAlbum(song),
+        play_now: false,
+        cover_url: getSongArtwork(song),
+        duration_ms: song.dt,
+      })
+      return
+    }
+
     await apiPost('/queue/netease', buildNeteaseQueuePayload(song, false))
   } catch (e: any) {
     const msg = String(e?.message ?? e)
@@ -75,8 +148,8 @@ function openPlaylist(playlist: FavoritePlaylist) {
   void router.push(`/playlist/${playlist.id}`)
 }
 
-function unfavSong(id: number) {
-  removeFavoriteSong(id)
+function unfavSong(song: FavoriteSong) {
+  removeFavoriteSong(song)
   refresh()
 }
 
@@ -133,7 +206,7 @@ onMounted(refresh)
           v-if="sortedSongs.length === 0"
           :icon="Music"
           title="暂无本地收藏歌曲"
-          description="你可以在搜索结果或歌单详情里点击心形收藏到本地"
+          description="你可以在网易云、QQ音乐或 B 站搜索结果里点击心形收藏到本地"
         />
 
         <div v-else class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden max-w-6xl mx-auto">
@@ -151,7 +224,7 @@ onMounted(refresh)
             <tbody class="divide-y divide-gray-50">
               <tr
                 v-for="(song, index) in sortedSongs"
-                :key="song.id"
+                :key="getFavoriteSongKey(song) || song.id"
                 class="group hover:bg-pink-50/30 transition-colors duration-200"
               >
                 <td class="px-3 md:px-6 py-3 md:py-4 text-sm text-gray-400 text-center font-medium group-hover:text-pink-600 w-10 md:w-16">
@@ -161,8 +234,8 @@ onMounted(refresh)
                   <div class="flex items-center gap-3 md:gap-4">
                     <div class="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0 shadow-sm bg-gray-100">
                       <img
-                        v-if="song.al?.picUrl"
-                        :src="song.al.picUrl + '?param=100y100'"
+                        v-if="getSongArtwork(song)"
+                        :src="getSongArtwork(song)"
                         :alt="song.name"
                         class="w-full h-full object-cover"
                       />
@@ -173,22 +246,41 @@ onMounted(refresh)
                     <div class="min-w-0">
                       <div class="font-semibold text-gray-900 line-clamp-1 text-sm group-hover:text-pink-700 transition-colors">{{ song.name }}</div>
                       <div class="text-xs text-gray-500 md:hidden line-clamp-1 mt-0.5">
-                        {{ (song.ar || []).map((a: any) => a.name).join(', ') }}
+                        {{ getSongArtists(song) || '未知作者' }}
+                      </div>
+                      <div class="mt-1 hidden md:flex items-center gap-2 text-[11px] text-gray-400">
+                        <span class="rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-500">
+                          {{ getSongSourceLabel(song) }}
+                        </span>
+                        <span v-if="isBilibiliSong(song) && getSongWebpageUrl(song)" class="truncate">
+                          可跳转原视频
+                        </span>
                       </div>
                     </div>
                   </div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-sm text-gray-600 hidden md:table-cell">
-                  <div class="truncate max-w-[150px]">{{ (song.ar || []).map((a: any) => a.name).join(', ') }}</div>
+                  <div class="truncate max-w-[150px]">{{ getSongArtists(song) }}</div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-sm text-gray-500 hidden lg:table-cell">
-                  <div class="truncate max-w-[150px]">{{ song.al?.name }}</div>
+                  <div class="truncate max-w-[150px]">{{ getSongAlbum(song) }}</div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right text-sm text-gray-400 font-mono tabular-nums">
                   {{ formatDuration(song.dt) }}
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right">
                   <div class="flex items-center justify-end gap-2 md:opacity-0 group-hover:opacity-100 transition-all duration-200">
+                    <a
+                      v-if="isBilibiliSong(song) && getSongWebpageUrl(song)"
+                      :href="getSongWebpageUrl(song)"
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      class="p-2 text-gray-400 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-colors"
+                      title="打开原视频"
+                    >
+                      <ExternalLink :size="18" />
+                    </a>
+
                     <button
                       class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                       title="添加到队列"
@@ -208,7 +300,7 @@ onMounted(refresh)
                     <button
                       class="p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
                       title="取消收藏"
-                      @click="unfavSong(song.id)"
+                      @click="unfavSong(song)"
                     >
                       <Trash2 :size="18" />
                     </button>

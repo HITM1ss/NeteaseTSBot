@@ -1,4 +1,5 @@
 import { apiPost } from '../api'
+import { getNeteaseQualityLevel, type NeteaseQualityLevel } from './neteaseQuality'
 
 type ArtistLike = {
   name?: string
@@ -66,7 +67,11 @@ function getTrackDurationMs(track: NeteaseTrackLike): number | undefined {
   return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : undefined
 }
 
-export function buildNeteaseQueuePayload(track: NeteaseTrackLike, playNow: boolean = false) {
+export function buildNeteaseQueuePayload(
+  track: NeteaseTrackLike,
+  playNow: boolean = false,
+  level?: NeteaseQualityLevel,
+) {
   return {
     song_id: String(track.id),
     title: getTrackTitle(track),
@@ -74,6 +79,7 @@ export function buildNeteaseQueuePayload(track: NeteaseTrackLike, playNow: boole
     album: getTrackAlbum(track),
     duration_ms: getTrackDurationMs(track),
     cover_url: getTrackCoverUrl(track),
+    level: level || getNeteaseQualityLevel(),
     play_now: playNow,
   }
 }

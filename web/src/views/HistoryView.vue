@@ -8,15 +8,23 @@ import {
   RefreshCw, 
   AlertCircle,
   Music,
-  Calendar
+  Calendar,
+  Heart,
+  ExternalLink,
 } from 'lucide-vue-next'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
 import { useTransientMessage } from '../composables/useTransientMessage'
+import { getFavoriteSongKey, getFavoriteSongs, isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
 
 const error = ref('')
 const history = ref<any[]>([])
 const loading = ref(false)
 const { message: actionError, showMessage: showActionError } = useTransientMessage()
+const favoriteSongKeys = ref<Set<string>>(new Set())
+
+function refreshFavoriteSongIds() {
+  favoriteSongKeys.value = new Set(getFavoriteSongs().map((song) => getFavoriteSongKey(song)).filter(Boolean))
+}
 
 async function load() {
   loading.value = true
@@ -28,6 +36,7 @@ async function load() {
     error.value = String(e?.message ?? e)
   } finally {
     loading.value = false
+    refreshFavoriteSongIds()
   }
 }
 
@@ -73,13 +82,39 @@ function getRelativeTime(dateString: string): string {
   return formatDateTime(dateString)
 }
 
-function formatDuration(duration: number): string {
-  const minutes = Math.floor(duration / 60000)
-  const seconds = Math.floor((duration % 60000) / 1000)
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`
+function isBilibiliTrack(track: any): boolean {
+  return String(track?.track_id || '').startsWith('bilibili:')
 }
 
-onMounted(load)
+function getTrackArtwork(track: any): string {
+  const raw = String(track?.artwork || '').trim()
+  return raw || ''
+}
+
+function getTrackWebpageUrl(track: any): string {
+  const trackId = String(track?.track_id || '').trim()
+  const match = trackId.match(/bilibili:(BV[0-9A-Za-z]+|av\d+)/i)
+  if (!match) return ''
+  const token = match[1]
+  const videoId = token.toLowerCase().startsWith('bv') ? `BV${token.slice(2)}` : token.toLowerCase()
+  return `https://www.bilibili.com/video/${videoId}`
+}
+
+function isLocalFav(track: any): boolean {
+  const key = getFavoriteSongKey(track)
+  if (!key) return false
+  return favoriteSongKeys.value.has(key) || isFavoriteSong(track)
+}
+
+function toggleLocalFav(track: any) {
+  toggleFavoriteSong(track)
+  refreshFavoriteSongIds()
+}
+
+onMounted(() => {
+  refreshFavoriteSongIds()
+  load()
+})
 </script>
 
 <template>
@@ -162,8 +197,8 @@ onMounted(load)
                     <!-- Thumbnail -->
                     <div class="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0 relative group/cover shadow-sm">
                       <img 
-                        v-if="track.artwork" 
-                        :src="track.artwork + '?param=100y100'" 
+                        v-if="getTrackArtwork(track)" 
+                        :src="getTrackArtwork(track)" 
                         :alt="track.title"
                         class="w-full h-full object-cover"
                       />
@@ -200,6 +235,16 @@ onMounted(load)
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right">
                   <div class="flex items-center justify-end gap-2 md:opacity-0 group-hover:opacity-100 transition-all duration-200 md:transform md:translate-x-2 group-hover:translate-x-0">
+                    <a
+                      v-if="isBilibiliTrack(track) && getTrackWebpageUrl(track)"
+                      :href="getTrackWebpageUrl(track)"
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      class="p-2 text-gray-400 hover:text-pink-600 hover:bg-pink-50 rounded-lg transition-colors"
+                      title="查看原视频"
+                    >
+                      <ExternalLink :size="18" />
+                    </a>
                     <button
                       @click="addToQueue(track)"
                       class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
@@ -213,6 +258,18 @@ onMounted(load)
                       title="立即播放"
                     >
                       <Play :size="18" />
+                    </button>
+                    <button
+                      @click="toggleLocalFav(track)"
+                      :class="[
+                        'p-2 rounded-lg transition-colors',
+                        isLocalFav(track)
+                          ? 'text-pink-600 bg-pink-50 hover:bg-pink-100'
+                          : 'text-gray-400 hover:text-pink-600 hover:bg-pink-50'
+                      ]"
+                      :title="isLocalFav(track) ? '取消本地收藏' : '本地收藏'"
+                    >
+                      <Heart :size="18" :fill="isLocalFav(track) ? 'currentColor' : 'none'" />
                     </button>
                   </div>
                 </td>

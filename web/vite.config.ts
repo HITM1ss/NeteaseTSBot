@@ -36,6 +36,16 @@ function parseAllowedHosts(value: string | undefined): string[] | undefined {
   return hosts.length ? hosts : undefined
 }
 
+function parseHostnameFromUrl(value: string | undefined): string | undefined {
+  const raw = (value || '').trim()
+  if (!raw) return undefined
+  try {
+    return new URL(raw).hostname || undefined
+  } catch {
+    return undefined
+  }
+}
+
 export default defineConfig(({ mode }) => {
   const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env }
 
@@ -50,7 +60,12 @@ export default defineConfig(({ mode }) => {
     rewrite: (path) => path.replace(/^\/api/, ''),
   }
 
-  const allowedHosts = parseAllowedHosts(env.TSBOT_WEB_ALLOWED_HOSTS)
+  const allowedHostsSet = new Set(parseAllowedHosts(env.TSBOT_WEB_ALLOWED_HOSTS) || [])
+  const publicHostname = parseHostnameFromUrl(env.VITE_WEB_PUBLIC_URL)
+  if (publicHostname) {
+    allowedHostsSet.add(publicHostname)
+  }
+  const allowedHosts = allowedHostsSet.size ? Array.from(allowedHostsSet) : undefined
 
   return {
     plugins: [vue()],

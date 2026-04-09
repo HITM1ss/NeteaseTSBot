@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import MusicPlayer from './components/MusicPlayer.vue'
+import { appConfig } from './appConfig'
 import { 
   Home, 
   Search, 
@@ -14,6 +15,7 @@ import {
 } from 'lucide-vue-next'
 
 const sidebarOpen = ref(false)
+const appName = appConfig.name
 
 const route = useRoute()
 const isLyricsRoute = computed(() => route.name === 'lyrics' || route.path.startsWith('/lyrics'))
@@ -53,7 +55,7 @@ function toggleSidebar() {
               <div class="w-8 h-8 bg-gradient-to-tr from-blue-600 to-indigo-500 rounded-lg flex items-center justify-center text-white shadow-md shadow-blue-200">
                 <Music :size="18" fill="currentColor" />
               </div>
-              <h1 class="text-lg font-bold text-gray-900 tracking-tight">TSBot Music</h1>
+              <h1 class="text-lg font-bold text-gray-900 tracking-tight">{{ appName }}</h1>
             </div>
             <button 
               @click="toggleSidebar"

@@ -69,19 +69,26 @@
         </div>
         
         <!-- Player controls (Center) -->
-        <div class="flex flex-col items-center justify-center gap-1 flex-none sm:flex-1 max-w-md">
-          <div class="flex items-center gap-2 sm:gap-4">
+        <div class="flex flex-col items-center justify-center gap-1 flex-none sm:flex-1 max-w-xl">
+          <div class="flex items-center gap-2 sm:gap-3">
             <button 
-              @click="toggleShuffle"
+              @click="cyclePlaybackMode"
               :class="[
-                'p-2 transition-colors hidden sm:block rounded-full',
-                playerState.isShuffled 
-                  ? 'text-blue-600 bg-blue-50 hover:bg-blue-100' 
-                  : 'text-gray-400 hover:text-gray-700 hover:bg-gray-100'
+                'inline-flex items-center gap-2 whitespace-nowrap rounded-full px-2.5 py-2 transition-all duration-200 sm:px-3',
+                playbackMode === 'list'
+                  ? 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
+                  : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
               ]"
-              title="随机播放"
+              :title="playbackModeTitle"
             >
-              <Shuffle :size="18" />
+              <component :is="playbackModeIcon" :size="18" />
+              <span class="hidden text-xs font-semibold xl:inline">{{ playbackModeLabel }}</span>
+              <span
+                v-if="playbackMode === 'repeat_one'"
+                class="flex h-4 w-4 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold leading-none text-white"
+              >
+                1
+              </span>
             </button>
             
             <button 
@@ -104,26 +111,6 @@
               class="p-1.5 sm:p-2 text-gray-700 hover:text-blue-600 transition-colors hover:bg-gray-100 rounded-full"
             >
               <SkipForward :size="20" class="sm:w-[22px] sm:h-[22px]" fill="currentColor" />
-            </button>
-            
-            <button 
-              @click="toggleRepeat"
-              :class="[
-                'p-2 transition-colors hidden sm:block rounded-full relative',
-                playerState.repeatMode !== 'none' 
-                  ? 'text-blue-600 bg-blue-50 hover:bg-blue-100' 
-                  : 'text-gray-400 hover:text-gray-700 hover:bg-gray-100'
-              ]"
-              :title="getRepeatTitle()"
-            >
-              <Repeat :size="18" />
-              <span 
-                v-if="playerState.repeatMode === 'one'"
-                class="absolute -top-0.5 -right-0.5 w-3 h-3 bg-blue-600 text-white text-xs rounded-full flex items-center justify-center font-bold"
-                style="font-size: 8px; line-height: 1;"
-              >
-                1
-              </span>
             </button>
           </div>
           
@@ -250,7 +237,27 @@
                 <input type="checkbox" :checked="fxSwapLr" @change="onFxSwapChange(($event.target as HTMLInputElement).checked)" />
               </label>
 
-              <div class="flex items-center justify-end gap-2">
+              <!-- Netease Quality Setting -->
+              <div class="pt-2 border-t border-gray-100">
+                <div class="text-xs font-semibold uppercase tracking-[0.24em] text-gray-400 mb-2">网易云默认音质</div>
+                <div class="grid grid-cols-2 gap-2">
+                  <button
+                    v-for="option in NETEASE_QUALITY_OPTIONS"
+                    :key="option.value"
+                    @click="updateNeteaseQuality(option.value)"
+                    :class="[
+                      'px-2 py-1.5 text-[11px] font-medium rounded-lg transition-all duration-200 border text-center',
+                      neteaseQuality === option.value
+                        ? 'bg-blue-50 border-blue-200 text-blue-600 shadow-sm'
+                        : 'bg-white border-gray-100 text-gray-600 hover:border-gray-300'
+                    ]"
+                  >
+                    {{ option.label }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="flex items-center justify-end gap-2 pt-2">
                 <button
                   class="px-3 py-1.5 text-sm rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700"
                   @click="resetFx"
@@ -286,12 +293,23 @@ import {
   VolumeX, 
   Repeat, 
   Shuffle,
+  ListMusic,
   Heart,
   MoreHorizontal,
-  Maximize2
+  Maximize2,
+  SlidersHorizontal,
+  Check,
+  ChevronDown,
 } from 'lucide-vue-next'
 import { apiGet, apiPost, apiPut } from '../api'
 import { isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
+import {
+  NETEASE_QUALITY_OPTIONS,
+  getNeteaseQualityLabel,
+  getNeteaseQualityLevel,
+  setNeteaseQualityLevel,
+  type NeteaseQualityLevel,
+} from '../utils/neteaseQuality'
 
 const router = useRouter()
 
@@ -318,6 +336,8 @@ interface PlayerState {
   repeatMode: 'none' | 'one' | 'all'
 }
 
+type PlaybackMode = 'list' | 'shuffle' | 'repeat_all' | 'repeat_one'
+
 const currentTrack = ref<Track | null>(null)
 const playerState = ref<PlayerState>({
   isPlaying: false,
@@ -334,6 +354,9 @@ const isLiked = ref(false)
 const queue = ref<Track[]>([])
 const currentTrackIndex = ref(-1)
 const shuffledQueue = ref<number[]>([])
+const neteaseQuality = ref<NeteaseQualityLevel>(getNeteaseQualityLevel())
+const showQualityMenu = ref(false)
+const qualityMenuRef = ref<HTMLElement | null>(null)
 
 const showFxPanel = ref(false)
 const fxLoading = ref(false)
@@ -354,6 +377,45 @@ const formattedDuration = computed(() => formatTime(playerState.value.duration))
 const progressPercent = computed(() => {
   if (playerState.value.duration === 0) return 0
   return (playerState.value.currentTime / playerState.value.duration) * 100
+})
+const playbackMode = computed<PlaybackMode>(() => {
+  if (playerState.value.isShuffled) return 'shuffle'
+  if (playerState.value.repeatMode === 'all') return 'repeat_all'
+  if (playerState.value.repeatMode === 'one') return 'repeat_one'
+  return 'list'
+})
+const playbackModeLabel = computed(() => {
+  switch (playbackMode.value) {
+    case 'shuffle':
+      return '随机'
+    case 'repeat_all':
+      return '列表循环'
+    case 'repeat_one':
+      return '单曲循环'
+    default:
+      return '列表顺序'
+  }
+})
+const playbackModeTitle = computed(() => `播放模式：${playbackModeLabel.value}，点击切换`)
+const playbackModeIcon = computed(() => {
+  switch (playbackMode.value) {
+    case 'shuffle':
+      return Shuffle
+    case 'repeat_all':
+    case 'repeat_one':
+      return Repeat
+    default:
+      return ListMusic
+  }
+})
+const neteaseQualityButtonLabel = computed(() => {
+  const label = getNeteaseQualityLabel(neteaseQuality.value)
+  if (label === '自动最高') return '自动'
+  if (label === '高清环绕声') return '环绕'
+  if (label === '沉浸环绕声') return '沉浸'
+  if (label === '杜比全景声') return '杜比'
+  if (label === '超清母带') return '母带'
+  return label
 })
 
 // Format time in MM:SS format
@@ -524,38 +586,65 @@ async function seekTo(percent: number) {
   }
 }
 
-async function toggleShuffle() {
+async function setShuffleEnabled(enabled: boolean) {
+  if (enabled) {
+    generateShuffledQueue()
+  }
+  await apiPost('/voice/shuffle', { enabled })
+}
+
+async function setRepeatMode(mode: PlayerState['repeatMode']) {
+  await apiPost('/voice/repeat', { mode })
+}
+
+async function setPlaybackMode(mode: PlaybackMode) {
+  const nextShuffle = mode === 'shuffle'
+  const nextRepeatMode: PlayerState['repeatMode'] =
+    mode === 'repeat_all' ? 'all' : mode === 'repeat_one' ? 'one' : 'none'
+
+  const previousShuffle = playerState.value.isShuffled
+  const previousRepeatMode = playerState.value.repeatMode
+
+  playerState.value.isShuffled = nextShuffle
+  playerState.value.repeatMode = nextRepeatMode
+
   try {
-    playerState.value.isShuffled = !playerState.value.isShuffled
-    if (playerState.value.isShuffled) {
-      generateShuffledQueue()
+    if (previousShuffle !== nextShuffle) {
+      await setShuffleEnabled(nextShuffle)
     }
-    await apiPost('/voice/shuffle', { enabled: playerState.value.isShuffled })
+    if (previousRepeatMode !== nextRepeatMode) {
+      await setRepeatMode(nextRepeatMode)
+    }
   } catch (e: any) {
+    playerState.value.isShuffled = previousShuffle
+    playerState.value.repeatMode = previousRepeatMode
     error.value = String(e?.message ?? e)
     setTimeout(() => error.value = '', 3000)
   }
 }
 
-async function toggleRepeat() {
-  try {
-    const modes: ('none' | 'one' | 'all')[] = ['none', 'all', 'one']
-    const currentIndex = modes.indexOf(playerState.value.repeatMode)
-    playerState.value.repeatMode = modes[(currentIndex + 1) % modes.length]
-    await apiPost('/voice/repeat', { mode: playerState.value.repeatMode })
-  } catch (e: any) {
-    error.value = String(e?.message ?? e)
-    setTimeout(() => error.value = '', 3000)
-  }
+async function cyclePlaybackMode() {
+  const modes: PlaybackMode[] = ['list', 'shuffle', 'repeat_all', 'repeat_one']
+  const currentIndex = modes.indexOf(playbackMode.value)
+  const nextMode = modes[(currentIndex + 1) % modes.length]
+  await setPlaybackMode(nextMode)
 }
 
-function getRepeatTitle(): string {
-  switch (playerState.value.repeatMode) {
-    case 'none': return '循环播放：关闭'
-    case 'all': return '循环播放：列表循环'
-    case 'one': return '循环播放：单曲循环'
-    default: return '循环播放'
-  }
+function toggleQualityMenu() {
+  showQualityMenu.value = !showQualityMenu.value
+}
+
+function updateNeteaseQuality(value: NeteaseQualityLevel) {
+  neteaseQuality.value = setNeteaseQualityLevel(value)
+  showQualityMenu.value = false
+}
+
+function handleDocumentPointerDown(event: PointerEvent) {
+  if (!showQualityMenu.value) return
+  const target = event.target as Node | null
+  if (!target) return
+  if (qualityMenuRef.value?.contains(target)) return
+  showQualityMenu.value = false
 }
 
 function generateShuffledQueue() {
@@ -709,12 +798,14 @@ function handleProgressClick(event: MouseEvent) {
 onMounted(() => {
   void loadPlayerState()
   void loadQueue()
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
   timer = window.setInterval(() => {
     void loadPlayerState()
   }, pollInterval)
 })
 
 onUnmounted(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
   if (timer) {
     clearInterval(timer)
     timer = null

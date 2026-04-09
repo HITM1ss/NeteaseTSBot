@@ -10,12 +10,18 @@ import {
   Music,
   Loader2,
   User,
-  Settings
+  Settings,
+  ExternalLink,
+  Star,
+  Tv,
+  ThumbsUp,
+  Coins
 } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
-import { getFavoriteSongs, isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
+import { getFavoriteSongKey, getFavoriteSongs, isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
+import { buildNeteaseQueuePayload } from '../utils/queue'
 import { useTransientMessage } from '../composables/useTransientMessage'
 
 const keywords = ref('')
@@ -27,7 +33,7 @@ const suggestions = ref<string[]>([])
 const hotSearches = ref<any[]>([])
 const showSuggestions = ref(false)
 const defaultKeyword = ref('')
-const selectedPlatform = ref<'netease' | 'qqmusic'>('netease')
+const selectedPlatform = ref<'netease' | 'qqmusic' | 'bilibili'>('netease')
 const qqMusicConfigured = ref(false)
 const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
@@ -38,16 +44,16 @@ const pageSize = ref(20)
 const hasMore = ref(false)
 const loadingMore = ref(false)
 
-const favoriteSongIds = ref<Set<number>>(new Set())
+const favoriteSongKeys = ref<Set<string>>(new Set())
 
 function refreshFavoriteSongIds() {
-  favoriteSongIds.value = new Set(getFavoriteSongs().map((s) => Number(s.id)))
+  favoriteSongKeys.value = new Set(getFavoriteSongs().map((song) => getFavoriteSongKey(song)).filter(Boolean))
 }
 
 function isLocalFav(song: any): boolean {
-  const id = Number(song?.id)
-  if (!Number.isFinite(id) || id <= 0) return false
-  return favoriteSongIds.value.has(id) || isFavoriteSong(id)
+  const key = getFavoriteSongKey(song)
+  if (!key) return false
+  return favoriteSongKeys.value.has(key) || isFavoriteSong(song)
 }
 
 function toggleLocalFav(song: any) {
@@ -120,7 +126,18 @@ async function search(isLoadMore = false) {
   showSuggestions.value = false
   
   try {
-    if (selectedPlatform.value === 'qqmusic') {
+    if (selectedPlatform.value === 'bilibili') {
+      const res = await apiGet<{ items: any[]; has_more: boolean }>(`/bilibili/search/videos?keywords=${encodeURIComponent(keywords.value)}&limit=${pageSize.value}&page=${currentPage.value}`)
+      const newSongs = res?.items || []
+
+      if (isLoadMore) {
+        songs.value = [...songs.value, ...newSongs]
+      } else {
+        songs.value = newSongs
+      }
+
+      hasMore.value = !!res?.has_more
+    } else if (selectedPlatform.value === 'qqmusic') {
       const res = await apiGet<{ songs: any[] }>(`/qqmusic/search/songs?keywords=${encodeURIComponent(keywords.value)}&limit=${pageSize.value}&page=${currentPage.value}`)
       const newSongs = res?.songs || []
       
@@ -165,6 +182,12 @@ async function loadMore() {
 }
 
 async function getSuggestions() {
+  if (selectedPlatform.value !== 'netease') {
+    suggestions.value = []
+    showSuggestions.value = false
+    return
+  }
+
   if (!keywords.value.trim()) {
     suggestions.value = []
     showSuggestions.value = false
@@ -215,24 +238,36 @@ async function enqueue(song: any, playNow: boolean) {
   error.value = ''
   status.value = ''
   try {
-    if (selectedPlatform.value === 'qqmusic') {
-      const artist = ((song.singer || song.artists) || []).map((a: any) => a.name).join(', ')
+    if (selectedPlatform.value === 'bilibili') {
+      const videoId = getBilibiliVideoId(song)
+      if (!videoId) {
+        throw new Error('未找到 B 站视频 ID')
+      }
+
+      const res = await apiPost<{ ok: boolean; id: number; trial?: boolean }>('/queue/bilibili', {
+        video_id: videoId,
+        title: getSongTitle(song) || videoId,
+        artist: getSongArtist(song),
+        album: getSongAlbum(song),
+        play_now: playNow,
+        cover_url: getSongArtwork(song),
+        duration_ms: getSongDurationMs(song),
+      })
+      status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
+    } else if (selectedPlatform.value === 'qqmusic') {
       const res = await apiPost<{ ok: boolean; id: number; source_url: string }>('/queue/qqmusic', {
         song_mid: String(song.mid || song.songmid),
-        title: song.name || song.title,
-        artist,
+        title: getSongTitle(song),
+        artist: getSongArtist(song),
         play_now: playNow,
         quality: "320",
-        album_mid: String(song.album?.mid || song.albummid || "")
+        album_mid: String(song.album?.mid || song.albummid || ""),
+        duration_ms: getSongDurationMs(song),
       })
       status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
     } else {
-      const artist = ((song.ar || song.artists) || []).map((a: any) => a.name).join(', ')
       const res = await apiPost<{ ok: boolean; id: number; source_url: string }>('/queue/netease', {
-        song_id: String(song.id),
-        title: song.name,
-        artist,
-        play_now: playNow,
+        ...buildNeteaseQueuePayload(song, playNow),
       })
       status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
     }
@@ -251,6 +286,174 @@ function formatDuration(duration: number): string {
   const minutes = Math.floor(duration / 60000)
   const seconds = Math.floor((duration % 60000) / 1000)
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
+}
+
+function parseDurationToMs(value: any): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value > 1000 ? value : value * 1000
+  }
+
+  const raw = String(value ?? '').trim()
+  if (!raw) return undefined
+  if (/^\d+$/.test(raw)) {
+    const seconds = Number(raw)
+    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined
+  }
+
+  const parts = raw.split(':').map((part) => Number(part))
+  if (!parts.length || parts.some((part) => !Number.isFinite(part) || part < 0)) {
+    return undefined
+  }
+
+  let seconds = 0
+  for (const part of parts) {
+    seconds = seconds * 60 + part
+  }
+  return seconds > 0 ? seconds * 1000 : undefined
+}
+
+function getBilibiliVideoId(song: any): string {
+  const raw = String(song?.video_id || song?.bvid || song?.track_id || song?.arcurl || '').trim()
+  const match = raw.match(/(BV[0-9A-Za-z]+|av\d+)/i)
+  if (!match) return ''
+  const value = match[1]
+  return value.toLowerCase().startsWith('bv') ? `BV${value.slice(2)}` : value.toLowerCase()
+}
+
+function getSongKey(song: any): string {
+  return String(
+    song?.track_id ||
+    song?.id ||
+    song?.songmid ||
+    song?.mid ||
+    song?.bvid ||
+    song?.video_id ||
+    song?.name ||
+    song?.title ||
+    ''
+  )
+}
+
+function getSongTitle(song: any): string {
+  return String(song?.name || song?.title || '').trim()
+}
+
+function getSongArtist(song: any): string {
+  if (selectedPlatform.value === 'qqmusic') {
+    return ((song?.singer || song?.artists) || []).map((a: any) => a?.name).filter(Boolean).join(', ')
+  }
+  if (selectedPlatform.value === 'bilibili') {
+    return String(song?.artist || song?.author || song?.owner?.name || '').trim()
+  }
+  return ((song?.ar || song?.artists) || []).map((a: any) => a?.name).filter(Boolean).join(', ')
+}
+
+function getSongAlbum(song: any): string {
+  if (selectedPlatform.value === 'qqmusic') {
+    return String(song?.album?.name || song?.albumname || '').trim()
+  }
+  if (selectedPlatform.value === 'bilibili') {
+    return String(song?.album || song?.typename || '').trim()
+  }
+  return String(song?.al?.name || song?.album?.name || '').trim()
+}
+
+function getSongArtwork(song: any): string {
+  if (selectedPlatform.value === 'qqmusic') {
+    const albumMid = String(song?.album?.pmid || song?.album?.mid || song?.albummid || '').trim()
+    return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ''
+  }
+  if (selectedPlatform.value === 'bilibili') {
+    const raw = String(song?.artwork_url || song?.pic || song?.thumbnail || '').trim()
+    if (!raw) return ''
+    if (raw.startsWith('//')) return `https:${raw}`
+    return raw
+  }
+  const raw = String(song?.al?.picUrl || song?.album?.picUrl || song?.artists?.[0]?.img1v1Url || '').trim()
+  return raw ? `${raw}?param=100y100` : ''
+}
+
+function getSongDescription(song: any): string {
+  if (selectedPlatform.value !== 'bilibili') return ''
+  return String(song?.description || song?.desc || '').trim()
+}
+
+function getSongWebpageUrl(song: any): string {
+  if (selectedPlatform.value !== 'bilibili') return ''
+
+  const raw = String(song?.webpage_url || song?.arcurl || song?.url || '').trim()
+  if (raw.startsWith('//')) return `https:${raw}`
+  if (raw.startsWith('http://') || raw.startsWith('https://')) return raw
+
+  const videoId = getBilibiliVideoId(song)
+  return videoId ? `https://www.bilibili.com/video/${videoId}` : ''
+}
+
+function parseMetricCount(value: any): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return value
+  }
+
+  const raw = String(value ?? '').replace(/,/g, '').trim()
+  if (!raw) return null
+
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed < 0) return null
+  return parsed
+}
+
+function getBilibiliMetric(song: any, key: 'likes' | 'favorites' | 'coins'): number | null {
+  const aliases: Record<'likes' | 'favorites' | 'coins', string[]> = {
+    likes: ['likes', 'like'],
+    favorites: ['favorites', 'favorite'],
+    coins: ['coins', 'coin'],
+  }
+
+  for (const field of aliases[key]) {
+    const value = parseMetricCount(song?.[field])
+    if (value !== null) return value
+  }
+
+  return null
+}
+
+function formatCompactCount(value: number | null): string {
+  if (value === null) return '--'
+  if (value < 10000) return String(value)
+  if (value < 100000000) {
+    const formatted = (value / 10000).toFixed(value >= 100000 ? 0 : 1)
+    return `${formatted.replace(/\.0$/, '')}万`
+  }
+  const formatted = (value / 100000000).toFixed(value >= 1000000000 ? 0 : 1)
+  return `${formatted.replace(/\.0$/, '')}亿`
+}
+
+function getSongDurationMs(song: any): number | undefined {
+  if (selectedPlatform.value === 'qqmusic') {
+    if (typeof song?.interval === 'number' && Number.isFinite(song.interval) && song.interval > 0) {
+      return song.interval * 1000
+    }
+    return parseDurationToMs(song?.duration)
+  }
+  if (selectedPlatform.value === 'bilibili') {
+    return parseDurationToMs(song?.duration_ms ?? song?.duration)
+  }
+  return parseDurationToMs(song?.dt ?? song?.duration)
+}
+
+function formatSongDuration(song: any): string {
+  const durationMs = getSongDurationMs(song)
+  return durationMs ? formatDuration(durationMs) : '--:--'
+}
+
+function getSearchPlaceholder(): string {
+  if (selectedPlatform.value === 'bilibili') {
+    return '搜索B站视频、UP主或关键词...'
+  }
+  if (selectedPlatform.value === 'qqmusic') {
+    return '搜索QQ音乐歌曲、歌手或专辑...'
+  }
+  return defaultKeyword.value ? `试试搜索: ${defaultKeyword.value}` : '搜索歌曲、艺术家或专辑...'
 }
 
 function handleKeyPress(event: KeyboardEvent) {
@@ -294,13 +497,13 @@ onMounted(() => {
     <div class="bg-white/80 backdrop-blur-md border-b border-gray-200 px-6 py-4 sticky top-0 z-30 shadow-sm transition-all duration-300">
       <h1 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
         <Search :size="28" class="text-blue-600" />
-        搜索音乐
+        搜索媒体
       </h1>
       
       <!-- Platform selector -->
       <div class="mb-4 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <span class="text-sm font-medium text-gray-700">音乐平台:</span>
+          <span class="text-sm font-medium text-gray-700">媒体平台:</span>
           <div class="flex bg-gray-100 rounded-lg p-1">
             <button
               @click="selectedPlatform = 'netease'"
@@ -323,6 +526,17 @@ onMounted(() => {
               ]"
             >
               QQ音乐
+            </button>
+            <button
+              @click="selectedPlatform = 'bilibili'"
+              :class="[
+                'px-3 py-1.5 text-sm font-medium rounded-md transition-all duration-200',
+                selectedPlatform === 'bilibili' 
+                  ? 'bg-white text-blue-600 shadow-sm' 
+                  : 'text-gray-600 hover:text-gray-900'
+              ]"
+            >
+              B站视频
             </button>
           </div>
         </div>
@@ -351,7 +565,7 @@ onMounted(() => {
           <input
             v-model="keywords"
             type="text"
-            :placeholder="defaultKeyword ? `试试搜索: ${defaultKeyword}` : '搜索歌曲、艺术家或专辑...'"
+            :placeholder="getSearchPlaceholder()"
             class="w-full pl-10 pr-24 py-3 bg-gray-100/50 border border-gray-200 rounded-xl text-gray-900 focus:bg-white focus:ring-2 focus:ring-blue-100 focus:border-blue-500 outline-none transition-all duration-200 placeholder-gray-400 text-sm font-medium"
             @keypress="handleKeyPress"
             @input="handleInput"
@@ -434,8 +648,8 @@ onMounted(() => {
       <EmptyState
         v-else-if="!songs.length && !error && keywords && !loading"
         :icon="Music"
-        title="未找到相关歌曲"
-        description="尝试使用不同的关键词搜索"
+        title="未找到相关内容"
+        description="尝试使用不同的关键词重新搜索"
         action-text="清除搜索条件"
         @action="keywords = ''"
       />
@@ -446,12 +660,12 @@ onMounted(() => {
            <div class="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto mb-4 text-blue-500">
              <Search :size="32" />
            </div>
-           <h2 class="text-lg font-bold text-gray-900">开始搜索音乐</h2>
-           <p class="text-gray-500 text-sm mt-1">发现百万首好歌</p>
+           <h2 class="text-lg font-bold text-gray-900">开始搜索内容</h2>
+           <p class="text-gray-500 text-sm mt-1">点歌、找视频、直接播放</p>
         </div>
         
         <!-- Hot searches -->
-        <div v-if="hotSearches.length > 0">
+        <div v-if="selectedPlatform === 'netease' && hotSearches.length > 0">
           <h3 class="text-sm font-bold text-gray-900 uppercase tracking-wider mb-4 flex items-center gap-2">
             <span class="w-1 h-4 bg-red-500 rounded-full"></span>
             热门搜索
@@ -479,7 +693,132 @@ onMounted(() => {
           </span>
         </div>
         
-        <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <div
+          v-if="selectedPlatform === 'bilibili'"
+          class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 px-1"
+        >
+          <div
+            v-for="(song, index) in songs"
+            :key="getSongKey(song)"
+            class="group bg-white rounded-2xl border border-gray-100 shadow-sm hover:shadow-xl hover:shadow-pink-500/10 hover:-translate-y-1.5 transition-all duration-300 overflow-hidden flex flex-col relative"
+          >
+            <!-- Thumbnail Area -->
+            <div class="relative aspect-video overflow-hidden bg-gray-100">
+              <img 
+                v-if="getSongArtwork(song)"
+                :src="getSongArtwork(song)"
+                :alt="getSongTitle(song)"
+                class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+              />
+              <div v-else class="w-full h-full flex items-center justify-center bg-gray-200">
+                <Music :size="32" class="text-gray-400" />
+              </div>
+              
+              <!-- Duration Badge -->
+              <div class="absolute bottom-2 right-2 px-2 py-1 bg-black/60 backdrop-blur-md text-white text-[10px] font-mono rounded-md z-10">
+                {{ formatSongDuration(song) }}
+              </div>
+
+              <!-- Play Overlay -->
+              <div 
+                class="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center cursor-pointer backdrop-blur-[2px]"
+                @click="enqueue(song, true)"
+              >
+                <div class="w-14 h-14 bg-white/95 rounded-full flex items-center justify-center shadow-2xl transform scale-75 group-hover:scale-100 transition-transform duration-500 ease-out">
+                  <Play :size="24" class="text-[#fb7299] ml-1" fill="currentColor" />
+                </div>
+              </div>
+
+              <!-- Platform Icon (Top Left) -->
+              <div class="absolute top-2 left-2 bg-white/95 backdrop-blur-sm p-1.5 rounded-lg shadow-sm border border-pink-100/50">
+                <Tv :size="14" class="text-[#fb7299]" />
+              </div>
+            </div>
+
+            <!-- Content Area -->
+            <div class="p-4 flex-1 flex flex-col">
+              <h4 
+                class="font-bold text-gray-900 line-clamp-2 text-sm leading-snug mb-3 group-hover:text-[#fb7299] transition-colors h-10"
+                :title="getSongTitle(song)"
+              >
+                {{ getSongTitle(song) }}
+              </h4>
+              
+              <div class="flex items-center gap-2 mb-4">
+                <div class="w-6 h-6 rounded-full bg-pink-50 flex items-center justify-center text-[10px] font-bold text-[#fb7299] shrink-0 border border-pink-100">
+                  <User :size="12" />
+                </div>
+                <span class="text-xs text-gray-600 font-medium truncate" :title="getSongArtist(song)">
+                  {{ getSongArtist(song) }}
+                </span>
+              </div>
+
+              <!-- Metrics -->
+              <div class="flex items-center gap-4 text-[11px] text-gray-400 mb-5 border-t border-gray-50 pt-3">
+                <div class="flex items-center gap-1.5 hover:text-[#fb7299] transition-colors" title="点赞">
+                  <ThumbsUp :size="12" />
+                  <span>{{ formatCompactCount(getBilibiliMetric(song, 'likes')) }}</span>
+                </div>
+                <div class="flex items-center gap-1.5 hover:text-yellow-500 transition-colors" title="收藏">
+                  <Star :size="12" />
+                  <span>{{ formatCompactCount(getBilibiliMetric(song, 'favorites')) }}</span>
+                </div>
+                <div class="flex items-center gap-1.5 hover:text-blue-400 transition-colors" title="投币">
+                  <Coins :size="12" />
+                  <span>{{ formatCompactCount(getBilibiliMetric(song, 'coins')) }}</span>
+                </div>
+              </div>
+
+              <!-- Actions -->
+              <div class="mt-auto flex items-center gap-2">
+                <button
+                  @click="enqueue(song, true)"
+                  class="flex-1 bg-gray-900 hover:bg-[#fb7299] text-white py-2.5 rounded-xl text-xs font-bold transition-all duration-300 flex items-center justify-center gap-2 shadow-sm active:scale-95"
+                >
+                  <Play :size="14" fill="currentColor" />
+                  立即播放
+                </button>
+                
+                <div class="flex gap-2">
+                  <button
+                    @click="enqueue(song, false)"
+                    class="p-2.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-xl border border-gray-100 transition-all duration-200 active:scale-90"
+                    title="添加到队列"
+                  >
+                    <Plus :size="18" />
+                  </button>
+                  
+                  <a
+                    v-if="getSongWebpageUrl(song)"
+                    :href="getSongWebpageUrl(song)"
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    @click.stop
+                    class="p-2.5 text-gray-500 hover:text-[#fb7299] hover:bg-pink-50 rounded-xl border border-gray-100 transition-all duration-200 active:scale-90"
+                    title="查看原视频"
+                  >
+                    <ExternalLink :size="18" />
+                  </a>
+
+                  <button
+                    @click.stop="toggleLocalFav(song)"
+                    :class="[
+                      'p-2.5 rounded-xl border border-gray-100 transition-all duration-200 active:scale-90',
+                      isLocalFav(song)
+                        ? 'bg-pink-50 text-pink-600 border-pink-100'
+                        : 'text-gray-500 hover:text-pink-600 hover:bg-pink-50'
+                    ]"
+                    :title="isLocalFav(song) ? '取消本地收藏' : '本地收藏'"
+                  >
+                    <Heart :size="18" :fill="isLocalFav(song) ? 'currentColor' : 'none'" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
           <table class="w-full text-left border-collapse">
             <thead class="bg-gray-50/50 text-gray-400 text-xs uppercase font-semibold border-b border-gray-100 hidden md:table-header-group">
               <tr>
@@ -494,7 +833,7 @@ onMounted(() => {
             <tbody class="divide-y divide-gray-50">
               <tr
                 v-for="(song, index) in songs"
-                :key="song.id"
+                :key="getSongKey(song)"
                 class="group hover:bg-blue-50/30 transition-colors duration-200"
               >
                 <td class="px-3 md:px-6 py-3 md:py-4 text-sm text-gray-400 text-center font-medium group-hover:text-blue-600 w-10 md:w-16">
@@ -505,9 +844,9 @@ onMounted(() => {
                     <!-- Thumbnail -->
                     <div class="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0 relative group/cover shadow-sm bg-gray-100">
                       <img 
-                        v-if="selectedPlatform === 'qqmusic' ? (song.album?.pmid || song.albummid) : (song.al?.picUrl || song.album?.picUrl || (song.artists && song.artists[0]?.img1v1Url))" 
-                        :src="selectedPlatform === 'qqmusic' ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${song.album?.pmid || song.albummid}.jpg` : ((song.al?.picUrl || song.album?.picUrl || song.artists?.[0]?.img1v1Url) + '?param=100y100')" 
-                        :alt="song.name || song.title"
+                        v-if="getSongArtwork(song)"
+                        :src="getSongArtwork(song)"
+                        :alt="getSongTitle(song)"
                         class="w-full h-full object-cover"
                       />
                       <div v-else class="w-full h-full bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center">
@@ -522,26 +861,38 @@ onMounted(() => {
                     </div>
                     
                     <div class="min-w-0">
-                      <div class="font-semibold text-gray-900 line-clamp-1 text-sm group-hover:text-blue-600 transition-colors" :title="song.name || song.title">{{ song.name || song.title }}</div>
+                      <div class="font-semibold text-gray-900 line-clamp-1 text-sm group-hover:text-blue-600 transition-colors" :title="getSongTitle(song)">{{ getSongTitle(song) }}</div>
                       <div class="text-xs text-gray-500 md:hidden line-clamp-1 mt-0.5">
-                        {{ selectedPlatform === 'qqmusic' ? ((song.singer || song.artists) || []).map((a: any) => a.name).join(', ') : ((song.ar || song.artists) || []).map((a: any) => a.name).join(', ') }}
+                        {{ getSongArtist(song) }}
                       </div>
                     </div>
                   </div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-sm text-gray-600 hidden md:table-cell">
-                   <div class="truncate max-w-[150px]" :title="selectedPlatform === 'qqmusic' ? ((song.singer || song.artists) || []).map((a: any) => a.name).join(', ') : ((song.ar || song.artists) || []).map((a: any) => a.name).join(', ')">
-                      {{ selectedPlatform === 'qqmusic' ? ((song.singer || song.artists) || []).map((a: any) => a.name).join(', ') : ((song.ar || song.artists) || []).map((a: any) => a.name).join(', ') }}
+                   <div class="truncate max-w-[150px]" :title="getSongArtist(song)">
+                      {{ getSongArtist(song) }}
                    </div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-sm text-gray-500 hidden lg:table-cell">
-                  <div class="truncate max-w-[150px]" :title="selectedPlatform === 'qqmusic' ? (song.album?.name || song.albumname) : (song.al?.name || song.album?.name)">{{ selectedPlatform === 'qqmusic' ? (song.album?.name || song.albumname) : (song.al?.name || song.album?.name) }}</div>
+                  <div class="truncate max-w-[150px]" :title="getSongAlbum(song)">{{ getSongAlbum(song) }}</div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right text-sm text-gray-400 font-mono tabular-nums">
-                  {{ song.dt || song.duration ? formatDuration(song.dt || song.duration) : '--:--' }}
+                  {{ formatSongDuration(song) }}
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right">
                   <div class="flex items-center justify-end gap-2 md:opacity-0 group-hover:opacity-100 transition-all duration-200 md:transform md:translate-x-2 group-hover:translate-x-0">
+                    <a
+                      v-if="getSongWebpageUrl(song)"
+                      :href="getSongWebpageUrl(song)"
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      @click.stop
+                      class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                      title="打开原页"
+                    >
+                      <ExternalLink :size="18" />
+                    </a>
+
                     <button
                       @click="enqueue(song, false)"
                       class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
@@ -583,7 +934,7 @@ onMounted(() => {
         
         <!-- Results info -->
         <div v-if="songs.length > 0" class="mt-4 text-center text-sm text-gray-500">
-          已显示 {{ songs.length }} 首歌曲
+          已显示 {{ songs.length }} 条结果
           <span v-if="!hasMore">（已全部加载）</span>
         </div>
       </div>
