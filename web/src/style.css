@@ -37,18 +37,38 @@
   /* 按钮样式 */
   .btn-primary {
     @apply bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:bg-gray-300 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg transition-all duration-200 font-medium shadow-sm hover:shadow active:shadow-none flex items-center justify-center gap-2;
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 180ms ease,
+      box-shadow 220ms ease,
+      border-color 180ms ease,
+      color 180ms ease;
   }
   
   .btn-secondary {
     @apply bg-white hover:bg-gray-50 active:bg-gray-100 text-gray-700 px-4 py-2 rounded-lg transition-all duration-200 font-medium border border-gray-200 hover:border-gray-300 flex items-center justify-center gap-2;
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 180ms ease,
+      box-shadow 220ms ease,
+      border-color 180ms ease,
+      color 180ms ease;
   }
   
   .btn-ghost {
     @apply bg-transparent hover:bg-gray-100 active:bg-gray-200 text-gray-600 hover:text-gray-900 px-3 py-2 rounded-lg transition-all duration-200 font-medium flex items-center justify-center gap-2;
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 180ms ease,
+      color 180ms ease;
   }
   
   .btn-icon {
     @apply p-2 rounded-full transition-all duration-200 hover:bg-gray-100 active:bg-gray-200 text-gray-500 hover:text-gray-900;
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 180ms ease,
+      color 180ms ease;
   }
   
   .btn-icon-primary {
@@ -66,15 +86,31 @@
   /* 卡片样式 */
   .card {
     @apply bg-white rounded-xl shadow-sm border border-gray-100 p-5 transition-all duration-200 hover:shadow-md hover:border-gray-200;
+    transition:
+      transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 240ms ease,
+      border-color 200ms ease,
+      background-color 220ms ease;
   }
   
   .card-compact {
     @apply bg-white rounded-lg shadow-sm border border-gray-100 p-4 transition-all duration-200;
+    transition:
+      transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 220ms ease,
+      border-color 200ms ease,
+      background-color 220ms ease;
   }
   
   /* 输入框样式 */
   .input-field {
     @apply w-full px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-gray-900 focus:ring-2 focus:ring-blue-100 focus:border-blue-500 outline-none transition-all duration-200 placeholder-gray-400;
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 180ms ease,
+      border-color 180ms ease,
+      box-shadow 180ms ease,
+      color 180ms ease;
   }
   
   .input-field-error {
@@ -120,6 +156,12 @@
   /* 导航项 */
   .nav-item {
     @apply flex items-center gap-3 px-4 py-3 rounded-xl text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-all duration-200 font-medium select-none;
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 180ms ease,
+      color 180ms ease,
+      border-color 180ms ease,
+      box-shadow 200ms ease;
   }
   
   .nav-item-active {
@@ -134,6 +176,11 @@
   /* Glassmorphism */
   .glass {
     @apply bg-white/80 backdrop-blur-md border border-white/20 shadow-sm;
+    transition:
+      transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 220ms ease,
+      box-shadow 240ms ease,
+      border-color 200ms ease;
   }
 
   .glass-dark {
@@ -235,9 +282,118 @@
       transform: scale(1); 
     }
   }
+
+  .route-shell-stage {
+    height: 100%;
+    min-height: 0;
+    will-change: transform, opacity;
+  }
+
+  .route-shell-enter-active,
+  .route-shell-leave-active {
+    transition:
+      opacity 240ms ease,
+      transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .route-shell-enter-from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  .route-shell-leave-to {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  .route-shell-enter-to,
+  .route-shell-leave-from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .search-pop-enter-active,
+  .search-pop-leave-active {
+    transition:
+      opacity 180ms ease,
+      transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform-origin: top center;
+  }
+
+  .search-pop-enter-from,
+  .search-pop-leave-to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+
+  .search-pop-enter-to,
+  .search-pop-leave-from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @layer utilities {
+  .theme-toolbar-btn,
+  .theme-player-shell,
+  .theme-floating-panel {
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 220ms ease,
+      box-shadow 240ms ease,
+      border-color 200ms ease,
+      color 180ms ease;
+  }
+
+  .theme-toolbar-btn:hover,
+  .btn-primary:hover,
+  .btn-secondary:hover,
+  .btn-ghost:hover,
+  .btn-icon:hover {
+    transform: translateY(-1px);
+  }
+
+  .theme-toolbar-btn:active,
+  .btn-primary:active,
+  .btn-secondary:active,
+  .btn-ghost:active,
+  .btn-icon:active {
+    transform: translateY(0) scale(0.98);
+  }
+
+  .nav-item:hover {
+    transform: translateX(3px);
+  }
+
+  .nav-item-active {
+    transform: translateX(2px);
+  }
+
+  .card:hover,
+  .card-compact:hover {
+    transform: translateY(-2px);
+  }
+
+  .theme-player-shell:hover {
+    box-shadow: 0 24px 50px rgba(0, 0, 0, 0.16);
+  }
+
+  .theme-floating-panel {
+    animation: floatIn 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform-origin: bottom right;
+  }
+
+  @keyframes floatIn {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
   body.theme-dark .app-shell {
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 140px),
@@ -265,6 +421,7 @@
   body.theme-dark .theme-toolbar-btn:hover {
     background-color: rgba(39, 39, 42, 0.88) !important;
     color: rgb(250 250 249) !important;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
   }
 
   body.theme-dark .theme-toolbar-btn-active {
@@ -516,5 +673,37 @@
 
   body.theme-dark .scrollbar-thin::-webkit-scrollbar-thumb:hover {
     background-color: #64748b;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .route-shell-stage,
+    .theme-toolbar-btn,
+    .theme-player-shell,
+    .theme-floating-panel,
+    .btn-primary,
+    .btn-secondary,
+    .btn-ghost,
+    .btn-icon,
+    .nav-item,
+    .card,
+    .card-compact {
+      transition: none !important;
+      animation: none !important;
+      transform: none !important;
+    }
+
+    .route-shell-enter-active,
+    .route-shell-leave-active,
+    .search-pop-enter-active,
+    .search-pop-leave-active {
+      transition: opacity 1ms linear !important;
+    }
+
+    .route-shell-enter-from,
+    .route-shell-leave-to,
+    .search-pop-enter-from,
+    .search-pop-leave-to {
+      transform: none !important;
+    }
   }
 }

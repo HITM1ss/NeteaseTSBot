@@ -586,47 +586,49 @@ onMounted(() => {
         </div>
         
         <!-- Search suggestions and history -->
-        <div 
-          v-if="isSearchFocused && ((showSuggestions && suggestions.length > 0) || (!keywords.trim() && searchHistory.length > 0))"
-          class="absolute top-full left-0 right-0 mt-2 bg-white/95 backdrop-blur-xl border border-gray-100/50 rounded-xl shadow-xl z-50 max-h-[320px] overflow-y-auto py-2 ring-1 ring-black/5"
-        >
-          <!-- Search suggestions -->
-          <div v-if="showSuggestions && suggestions.length > 0">
-            <div class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide">搜索建议</div>
-            <div
-              v-for="suggestion in suggestions"
-              :key="suggestion"
-              @click="selectSuggestion(suggestion)"
-              class="px-4 py-2.5 hover:bg-blue-50/50 cursor-pointer flex items-center gap-3 group transition-colors"
-            >
-              <Search :size="16" class="text-gray-400 group-hover:text-blue-500" />
-              <span class="text-gray-700 group-hover:text-gray-900">{{ suggestion }}</span>
-            </div>
-          </div>
-          
-          <!-- Search history -->
-          <div v-if="!keywords.trim() && searchHistory.length > 0">
-            <div class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center justify-between">
-              <span>搜索历史</span>
-              <button 
-                @click="clearSearchHistory"
-                class="text-gray-400 hover:text-red-500 transition-colors"
-                title="清除历史"
+        <transition name="search-pop">
+          <div 
+            v-if="isSearchFocused && ((showSuggestions && suggestions.length > 0) || (!keywords.trim() && searchHistory.length > 0))"
+            class="absolute top-full left-0 right-0 mt-2 bg-white/95 backdrop-blur-xl border border-gray-100/50 rounded-xl shadow-xl z-50 max-h-[320px] overflow-y-auto py-2 ring-1 ring-black/5"
+          >
+            <!-- Search suggestions -->
+            <div v-if="showSuggestions && suggestions.length > 0">
+              <div class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide">搜索建议</div>
+              <div
+                v-for="suggestion in suggestions"
+                :key="suggestion"
+                @click="selectSuggestion(suggestion)"
+                class="px-4 py-2.5 hover:bg-blue-50/50 cursor-pointer flex items-center gap-3 group transition-colors"
               >
-                <span class="text-xs">清除</span>
-              </button>
+                <Search :size="16" class="text-gray-400 group-hover:text-blue-500" />
+                <span class="text-gray-700 group-hover:text-gray-900">{{ suggestion }}</span>
+              </div>
             </div>
-            <div
-              v-for="historyItem in searchHistory"
-              :key="historyItem"
-              @click="selectSuggestion(historyItem)"
-              class="px-4 py-2.5 hover:bg-gray-50/50 cursor-pointer flex items-center gap-3 group transition-colors"
-            >
-              <Clock :size="16" class="text-gray-400 group-hover:text-gray-600" />
-              <span class="text-gray-600 group-hover:text-gray-900">{{ historyItem }}</span>
+            
+            <!-- Search history -->
+            <div v-if="!keywords.trim() && searchHistory.length > 0">
+              <div class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center justify-between">
+                <span>搜索历史</span>
+                <button 
+                  @click="clearSearchHistory"
+                  class="text-gray-400 hover:text-red-500 transition-colors"
+                  title="清除历史"
+                >
+                  <span class="text-xs">清除</span>
+                </button>
+              </div>
+              <div
+                v-for="historyItem in searchHistory"
+                :key="historyItem"
+                @click="selectSuggestion(historyItem)"
+                class="px-4 py-2.5 hover:bg-gray-50/50 cursor-pointer flex items-center gap-3 group transition-colors"
+              >
+                <Clock :size="16" class="text-gray-400 group-hover:text-gray-600" />
+                <span class="text-gray-600 group-hover:text-gray-900">{{ historyItem }}</span>
+              </div>
             </div>
           </div>
-        </div>
+        </transition>
       </div>
     </div>
 

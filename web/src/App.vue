@@ -41,7 +41,13 @@ function toggleTheme() {
   <div :class="['app-shell min-h-screen transition-colors duration-300', isLyricsRoute ? 'bg-black h-[100dvh] overflow-hidden' : 'bg-gray-50 pb-24']">
     <template v-if="isLyricsRoute">
       <div class="h-full relative z-0">
-        <RouterView />
+        <RouterView v-slot="{ Component, route: currentRoute }">
+          <Transition name="route-shell" mode="out-in">
+            <div :key="currentRoute.fullPath" class="route-shell-stage h-full min-h-0">
+              <component :is="Component" />
+            </div>
+          </Transition>
+        </RouterView>
       </div>
     </template>
 
@@ -203,7 +209,13 @@ function toggleTheme() {
         
         <!-- Content area -->
         <main class="flex-1 min-h-0 relative z-0">
-          <RouterView />
+          <RouterView v-slot="{ Component, route: currentRoute }">
+            <Transition name="route-shell" mode="out-in">
+              <div :key="currentRoute.fullPath" class="route-shell-stage h-full min-h-0">
+                <component :is="Component" />
+              </div>
+            </Transition>
+          </RouterView>
         </main>
       </div>
     </template>
