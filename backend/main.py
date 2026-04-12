@@ -21,7 +21,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .crypto import decrypt_text, encrypt_text
-from .db import create_db_and_tables, get_session, new_session
+from .db import create_db_and_tables, get_database_url, get_session, get_sqlite_db_path, new_session
 from .models import HistoryItem, QueueItem, Secret
 from .netease import NeteaseClient
 from .qqmusic import QQMusicClient
@@ -3284,9 +3284,11 @@ async def admin_debug_config(request: Request) -> dict:
 @app.get("/admin/debug/runtime")
 async def admin_debug_runtime(request: Request) -> dict:
     _require_admin_token(request)
+    sqlite_db_path = get_sqlite_db_path()
     return {
         "cwd": os.getcwd(),
-        "sqlite_db_path": str(Path("./tsbot.db").resolve()),
+        "sqlite_db_path": str(Path(sqlite_db_path).resolve()) if sqlite_db_path else None,
+        "database_url": get_database_url(),
     }
 
 

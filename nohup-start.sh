@@ -11,9 +11,14 @@ if [[ -f "$ROOT_DIR/tsbot.env" ]]; then
   source "$ROOT_DIR/tsbot.env"
 fi
 
-port_pid() {
+port_listener_pid() {
   local port="$1"
   ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n1
+}
+
+port_is_listening() {
+  local port="$1"
+  ss -ltnH "sport = :${port}" 2>/dev/null | grep -q .
 }
 
 start_one() {
@@ -23,9 +28,13 @@ start_one() {
   local cmd="$4"
 
   local pid
-  pid="$(port_pid "$port" || true)"
-  if [[ -n "${pid}" ]]; then
-    echo "[skip] ${name} already listening on :${port} (pid=${pid})"
+  pid="$(port_listener_pid "$port" || true)"
+  if port_is_listening "$port"; then
+    if [[ -n "${pid}" ]]; then
+      echo "[skip] ${name} already listening on :${port} (pid=${pid})"
+    else
+      echo "[skip] ${name} already listening on :${port} (pid hidden; try sudo ss -lntp 'sport = :${port}')"
+    fi
     return 0
   fi
 
