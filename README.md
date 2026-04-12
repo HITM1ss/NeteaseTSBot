@@ -17,7 +17,7 @@ TSBot 是一个基于 TeamSpeak 的音乐机器人；`voice-service` 主客户�
 - **播放队列/控制**（暂停/继续/下一首/上一首、音量、随机/循环等）
 - **网易云音乐搜索/歌单/喜欢/歌词**（通过外部 `NeteaseCloudMusicApi` 服务）
 - **QQ 音乐搜索/歌单/歌词/播放链接**（后端内建适配，登录态能力可通过 Web 控制台配置）
-- **B 站视频搜索与音频播放**（支持搜索视频、展示简介/点赞/收藏/投币，并在播放时缓存音频）
+- **B 站视频搜索与音频播放**（支持搜索视频、展示简介/点赞/收藏/投币，并在播放时缓存音频；有字幕的视频可在歌词页显示字幕时间轴，支持通过管理员登录态补抓 AI 字幕）
 - **Web 控制台**（Vue3 前端，用于搜索/队列/最近播放/本地收藏/歌词/设置）
 - **外部集成 API**（`/external/*` 提供统一搜索、入队、状态读取、历史读取与历史重播）
 ![预览图](docs/1.png)
@@ -73,6 +73,7 @@ TSBot 的目标是把边界重新划清：
 
 - **NeteaseCloudMusicApi**（仅网易云能力需要；需单独部署 HTTP 服务）
 - **QQ 音乐**（后端内建适配；用户歌单和更稳定的播放链接通常需要管理员 QQ 音乐 Cookie）
+- **Playwright Chromium**（仅 B 站扫码登录和登录态 AI 字幕抓取需要；安装 Python 依赖后执行 `python -m playwright install chromium`）
 
 ## 架构概览
 
@@ -127,6 +128,8 @@ B 站能力由后端直接适配，不需要额外部署独立 API 服务。
 - 支持搜索 B 站视频，并返回统一后的标题、UP 主、分区、简介、点赞、收藏、投币、封面和原视频链接。
 - 支持按 `BV` / `av` / 视频 URL 入队。
 - 实际播放时，后端会先把音频下载到本地缓存，再交给 `voice-service` 播放。
+- 可通过 Web 控制台或 `/admin/bilibili/*` 接口保存管理员 B 站 Cookie，用于登录态 API 和 Playwright 抓取 AI 字幕。
+- 当公开视频接口拿不到字幕轨时，后端会在存在管理员 B 站 Cookie 的前提下，尝试使用登录态接口和 Playwright 页面环境补抓 AI 字幕。
 - 可通过 `TSBOT_BILIBILI_MAX_DURATION_MINUTES` 限制允许点播的最长视频时长，避免超长视频拖垮播放链路。
 
 ## 快速开始（推荐）
@@ -148,6 +151,7 @@ cp tsbot.env.example tsbot.env
 
 - 使用网易云：设置 `TSBOT_NETEASE_API_BASE` 为你部署的 `NeteaseCloudMusicApi` 地址，例如 `http://127.0.0.1:3000/`
 - 使用 QQ 音乐登录态能力：通过 Web 控制台或 `/admin/qqmusic/*` 接口写入管理员 QQ 音乐 Cookie
+- 使用 B 站登录态 AI 字幕抓取：通过 Web 控制台或 `/admin/bilibili/*` 接口写入管理员 B 站 Cookie
 
 可选：
 
@@ -177,6 +181,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python -m playwright install chromium
 cd ..
 ```
 

@@ -13,7 +13,7 @@ defineProps<{
         v-if="message"
         class="pointer-events-none fixed inset-x-4 bottom-24 z-[90] flex justify-center sm:inset-x-auto sm:right-6 sm:justify-end"
       >
-        <div class="w-full max-w-md rounded-2xl border border-red-200 bg-white/95 px-4 py-3 shadow-2xl backdrop-blur-xl">
+        <div class="theme-floating-panel w-full max-w-md rounded-2xl border border-red-200 bg-white/95 px-4 py-3 shadow-2xl backdrop-blur-xl">
           <div class="flex items-start gap-3 text-red-700">
             <AlertCircle :size="18" class="mt-0.5 shrink-0" />
             <div class="min-w-0">

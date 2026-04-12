@@ -8,7 +8,7 @@
           系统设置
         </h1>
         <span class="text-sm text-gray-500 hidden md:inline-block border-l border-gray-200 pl-4 h-5 leading-5">
-          管理您的网易云音乐登录状态和系统配置
+          管理您的网易云、QQ音乐、B站登录状态和系统配置
         </span>
       </div>
     </div>
@@ -273,13 +273,119 @@
             </div>
           </div>
         </section>
+
+        <!-- Bilibili Admin Section -->
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden relative">
+          <div class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
+            <Shield :size="200" class="text-black" />
+          </div>
+
+          <div class="p-5 md:p-8 relative z-10">
+            <div class="flex items-center justify-between mb-6 md:mb-8">
+              <div>
+                <h2 class="text-xl font-bold text-gray-900 flex items-center gap-3">
+                  B站后台授权
+                  <span
+                    :class="[
+                      'text-xs px-2.5 py-1 rounded-full font-semibold border transition-colors',
+                      bilibiliAdminStatus
+                        ? 'bg-green-50 text-green-700 border-green-200'
+                        : 'bg-gray-100 text-gray-600 border-gray-200'
+                    ]"
+                  >
+                    {{ bilibiliAdminStatus ? '已授权' : '未授权' }}
+                  </span>
+                </h2>
+                <p class="text-gray-500 text-sm mt-2">用于服务器端登录态接口和 AI 字幕 Playwright 抓取兜底</p>
+              </div>
+            </div>
+
+            <div class="space-y-8">
+              <div class="flex flex-col md:flex-row gap-8">
+                <div class="flex-1 space-y-6">
+                  <div class="flex flex-wrap gap-3">
+                    <button @click="startBilibiliAdminQr" class="btn-primary shadow-blue-200">
+                      <QrCode :size="18" />
+                      扫码授权
+                    </button>
+                    <button @click="load" class="btn-secondary">
+                      <RefreshCw :size="18" />
+                      刷新状态
+                    </button>
+                  </div>
+
+                  <div v-if="bilibiliAdminStatus" class="flex items-center gap-2 text-sm text-green-600 font-medium">
+                    <CheckCircle2 :size="16" />
+                    服务器已配置有效 Cookie
+                  </div>
+
+                  <div
+                    :class="[
+                      'inline-flex items-center gap-2 text-sm font-medium',
+                      bilibiliPlaywrightAvailable ? 'text-green-600' : 'text-amber-600'
+                    ]"
+                  >
+                    <CheckCircle2 v-if="bilibiliPlaywrightAvailable" :size="16" />
+                    <AlertCircle v-else :size="16" />
+                    {{
+                      bilibiliPlaywrightAvailable
+                        ? 'Playwright Chromium 已就绪，可用于 AI 字幕抓取'
+                        : bilibiliPlaywrightDependencyInstalled
+                          ? 'Playwright 已安装，但 Chromium 未就绪，请在服务器执行 python -m playwright install chromium'
+                          : 'Playwright 未安装，请先安装后端依赖并补装 Chromium'
+                    }}
+                  </div>
+                </div>
+
+                <div
+                  v-if="bilibiliAdminQrImg"
+                  class="flex-shrink-0 flex flex-col items-center gap-4 bg-white p-6 rounded-2xl border border-gray-200 shadow-lg shadow-gray-100 animate-scale-in"
+                >
+                  <img :src="bilibiliAdminQrImg" alt="bilibili admin qr" class="w-48 h-48 object-contain rounded-lg" />
+                  <span class="text-sm text-gray-500 font-medium flex items-center gap-1.5">
+                    <Smartphone :size="16" />
+                    请使用哔哩哔哩 App 扫码
+                  </span>
+                </div>
+              </div>
+
+              <div class="pt-8 border-t border-gray-100">
+                <h3 class="text-sm font-bold text-gray-900 mb-4 flex items-center gap-2">
+                  <Terminal :size="16" class="text-gray-400" />
+                  手动配置
+                </h3>
+                <div class="flex flex-col md:flex-row gap-3">
+                  <input
+                    v-model="bilibiliAdminManualCookie"
+                    type="text"
+                    placeholder="输入 B站 Cookie 字符串 (SESSDATA=...; bili_jct=... 等)"
+                    class="input-field flex-1 font-mono text-sm"
+                  />
+                  <input
+                    v-model="adminToken"
+                    type="password"
+                    placeholder="Admin Token (可选)"
+                    class="input-field md:w-48 font-mono text-sm"
+                  />
+                  <button @click="setBilibiliAdminCookie" class="btn-secondary whitespace-nowrap font-medium">
+                    保存配置
+                  </button>
+                </div>
+                <p class="text-xs text-gray-400 mt-3 flex items-center gap-1.5">
+                  <AlertCircle :size="12" />
+                  B站 AI 字幕常常和登录态、账号灰度相关联，建议优先使用扫码登录。
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { apiGet, apiPost } from '../api'
 import { 
   Settings, 
@@ -311,9 +417,15 @@ const qqAdminQrImg = ref('')
 const qqAdminPtqrtoken = ref('')
 const qqAdminPtLoginSig = ref('')
 const qqAdminAuthUrl = ref('')
+const bilibiliAdminStatus = ref<boolean>(false)
+const bilibiliAdminQrSessionId = ref('')
+const bilibiliAdminQrImg = ref('')
+const bilibiliPlaywrightAvailable = ref(false)
+const bilibiliPlaywrightDependencyInstalled = ref(false)
 
 const adminManualCookie = ref('')
 const qqAdminManualCookie = ref('')
+const bilibiliAdminManualCookie = ref('')
 const adminToken = ref('')
 
 const status = ref('')
@@ -321,6 +433,7 @@ const status = ref('')
 let userTimer: number | null = null
 let adminTimer: number | null = null
 let qqAdminTimer: number | null = null
+let bilibiliAdminTimer: number | null = null
 
 function getAdminHeaders(): Record<string, string> {
   const headers: Record<string, string> = {}
@@ -339,6 +452,17 @@ async function load() {
     qqAdminStatus.value = !!qst?.admin_cookie_set
   } catch {
     qqAdminStatus.value = false
+  }
+
+  try {
+    const bst = await apiGet<{ admin_cookie_set: boolean; playwright_available?: boolean; playwright_dependency_installed?: boolean }>('/admin/bilibili/status', getAdminHeaders())
+    bilibiliAdminStatus.value = !!bst?.admin_cookie_set
+    bilibiliPlaywrightAvailable.value = !!bst?.playwright_available
+    bilibiliPlaywrightDependencyInstalled.value = !!bst?.playwright_dependency_installed
+  } catch {
+    bilibiliAdminStatus.value = false
+    bilibiliPlaywrightAvailable.value = false
+    bilibiliPlaywrightDependencyInstalled.value = false
   }
 }
 
@@ -435,6 +559,79 @@ async function setQQAdminCookie() {
   }
 }
 
+async function startBilibiliAdminQr() {
+  status.value = ''
+  try {
+    stopBilibiliAdminPoll()
+    bilibiliAdminQrImg.value = ''
+    bilibiliAdminQrSessionId.value = ''
+
+    const result = await apiPost<any>('/admin/bilibili/qr/start', {}, getAdminHeaders())
+    const imgBase64 = String(result?.qr_image_base64 || '')
+    bilibiliAdminQrImg.value = imgBase64 ? `data:image/png;base64,${imgBase64}` : ''
+    bilibiliAdminQrSessionId.value = String(result?.session_id || '')
+    if (!bilibiliAdminQrSessionId.value || !bilibiliAdminQrImg.value) throw new Error('failed to create bilibili qr')
+
+    status.value = 'bilibili admin qr created'
+    bilibiliAdminTimer = window.setInterval(checkBilibiliAdminQr, 1500)
+  } catch (e: any) {
+    status.value = String(e?.message ?? e)
+  }
+}
+
+async function checkBilibiliAdminQr() {
+  try {
+    if (!bilibiliAdminQrSessionId.value) return
+    const result = await apiGet<any>(
+      `/admin/bilibili/qr/check?session_id=${encodeURIComponent(bilibiliAdminQrSessionId.value)}`,
+      getAdminHeaders(),
+    )
+    const qrStatus = String(result?.status || '')
+
+    if (qrStatus === 'waiting') {
+      status.value = 'bilibili qr waiting'
+      return
+    }
+    if (qrStatus === 'scanned') {
+      status.value = 'bilibili qr scanned (confirm on phone)'
+      return
+    }
+    if (qrStatus === 'expired') {
+      status.value = 'bilibili qr expired'
+      stopBilibiliAdminPoll()
+      return
+    }
+    if (qrStatus === 'authorized') {
+      if (result?.admin_cookie_set) {
+        status.value = 'bilibili admin authorized (cookie saved server-side)'
+      } else {
+        status.value = String(result?.message || '扫码已确认，但服务器还没拿到完整登录 Cookie，请重试一次')
+      }
+      stopBilibiliAdminPoll()
+      await load()
+      return
+    }
+
+    status.value = `bilibili qr unknown: status=${qrStatus}${result?.message ? ` (${String(result.message)})` : ''}`
+  } catch (e: any) {
+    status.value = String(e?.message ?? e)
+  }
+}
+
+async function setBilibiliAdminCookie() {
+  status.value = ''
+  try {
+    const cookie = bilibiliAdminManualCookie.value
+    if (!cookie.trim()) throw new Error('cookie is empty')
+    await apiPost<any>('/admin/bilibili/cookie', { cookie }, getAdminHeaders())
+    bilibiliAdminManualCookie.value = ''
+    status.value = 'bilibili admin cookie saved server-side'
+    await load()
+  } catch (e: any) {
+    status.value = String(e?.message ?? e)
+  }
+}
+
 function clearUserCookie() {
   localStorage.removeItem(USER_COOKIE_KEY)
   userCookie.value = ''
@@ -459,6 +656,13 @@ function stopQQAdminPoll() {
   if (qqAdminTimer !== null) {
     clearInterval(qqAdminTimer)
     qqAdminTimer = null
+  }
+}
+
+function stopBilibiliAdminPoll() {
+  if (bilibiliAdminTimer !== null) {
+    clearInterval(bilibiliAdminTimer)
+    bilibiliAdminTimer = null
   }
 }
 
@@ -569,4 +773,10 @@ async function checkAdminQr() {
 }
 
 onMounted(load)
+onUnmounted(() => {
+  stopUserPoll()
+  stopAdminPoll()
+  stopQQAdminPoll()
+  stopBilibiliAdminPoll()
+})
 </script>

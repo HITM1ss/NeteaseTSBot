@@ -32,6 +32,7 @@ const loading = ref(false)
 const suggestions = ref<string[]>([])
 const hotSearches = ref<any[]>([])
 const showSuggestions = ref(false)
+const isSearchFocused = ref(false)
 const defaultKeyword = ref('')
 const selectedPlatform = ref<'netease' | 'qqmusic' | 'bilibili'>('netease')
 const qqMusicConfigured = ref(false)
@@ -467,6 +468,7 @@ function handleInput() {
 }
 
 function handleFocus() {
+  isSearchFocused.value = true
   if (keywords.value.trim()) {
     getSuggestions()
   }
@@ -475,6 +477,7 @@ function handleFocus() {
 function handleBlur() {
   // 延迟隐藏建议，允许点击建议项
   setTimeout(() => {
+    isSearchFocused.value = false
     showSuggestions.value = false
   }, 200)
 }
@@ -584,7 +587,7 @@ onMounted(() => {
         
         <!-- Search suggestions and history -->
         <div 
-          v-if="(showSuggestions && suggestions.length > 0) || (!keywords.trim() && searchHistory.length > 0)"
+          v-if="isSearchFocused && ((showSuggestions && suggestions.length > 0) || (!keywords.trim() && searchHistory.length > 0))"
           class="absolute top-full left-0 right-0 mt-2 bg-white/95 backdrop-blur-xl border border-gray-100/50 rounded-xl shadow-xl z-50 max-h-[320px] overflow-y-auto py-2 ring-1 ring-black/5"
         >
           <!-- Search suggestions -->

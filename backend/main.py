@@ -20,6 +20,15 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from .bilibili_auth import (
+    close_all_bilibili_qr_sessions,
+    cookie_string_to_dict,
+    fetch_bilibili_subtitle_candidates_via_playwright,
+    is_playwright_available,
+    is_playwright_runtime_available,
+    poll_bilibili_qr_login_session,
+    start_bilibili_qr_login_session,
+)
 from .crypto import decrypt_text, encrypt_text
 from .db import create_db_and_tables, get_database_url, get_session, get_sqlite_db_path, new_session
 from .models import HistoryItem, QueueItem, Secret
@@ -48,6 +57,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BILIBILI_AUDIO_DIR = REPO_ROOT / "tmp" / "bilibili_audio"
 _BILIBILI_VIDEO_ID_RE = re.compile(r"(BV[0-9A-Za-z]+|av\d+)", re.IGNORECASE)
 _BILIBILI_TAG_RE = re.compile(r"<[^>]+>")
+_BILIBILI_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+_BILIBILI_LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
 _BILIBILI_DEFAULT_HEADERS = {
     "user-agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -62,6 +73,8 @@ _BILIBILI_VIEW_SUMMARY_CACHE_TTL_S = 600.0
 _BILIBILI_VIEW_SUMMARY_CONCURRENCY = 6
 _bilibili_view_summary_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _bilibili_view_summary_semaphore = asyncio.Semaphore(_BILIBILI_VIEW_SUMMARY_CONCURRENCY)
+_BILIBILI_SUBTITLE_CACHE_TTL_S = 1800.0
+_bilibili_subtitle_cache: dict[str, tuple[float, list[LyricLine]]] = {}
 _NETEASE_QUALITY_LEVELS = (
     "standard",
     "higher",
@@ -281,6 +294,7 @@ async def _shutdown() -> None:
     if _chat_task is not None:
         _chat_task.cancel()
         _chat_task = None
+    await close_all_bilibili_qr_sessions()
     await voice.close()
 
 
@@ -1060,6 +1074,169 @@ def _normalize_bilibili_artwork_url(value: object) -> str:
     return f"https://{raw.lstrip('/')}"
 
 
+def _normalize_bilibili_subtitle_url(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        return f"https:{raw}"
+    if raw.startswith("http://"):
+        return f"https://{raw[len('http://'):]}"
+    if raw.startswith("https://"):
+        return raw
+    return f"https://{raw.lstrip('/')}"
+
+
+def _count_bilibili_cjk_chars(value: str) -> int:
+    return len(_BILIBILI_CJK_CHAR_RE.findall(value or ""))
+
+
+def _count_bilibili_latin_chars(value: str) -> int:
+    return len(_BILIBILI_LATIN_CHAR_RE.findall(value or ""))
+
+
+def _infer_bilibili_subtitle_preference(*values: object) -> str:
+    text = " ".join(_clean_bilibili_text(value) for value in values if str(value or "").strip())
+    if not text:
+        return "neutral"
+
+    latin_count = _count_bilibili_latin_chars(text)
+    cjk_count = _count_bilibili_cjk_chars(text)
+
+    if latin_count >= max(6, cjk_count * 2):
+        return "english"
+    if cjk_count >= max(2, latin_count):
+        return "chinese"
+    return "neutral"
+
+
+def _classify_bilibili_subtitle_language(meta: dict) -> str:
+    tokens = " ".join(
+        str(meta.get(key) or "").strip()
+        for key in ("lan", "lan_doc", "lang", "language")
+    )
+    lower_tokens = tokens.lower()
+
+    if any(token in tokens for token in ("中英", "双语", "双語")) or "bilingual" in lower_tokens:
+        return "bilingual"
+    if any(token in tokens for token in ("英文", "英语", "英語")):
+        return "english"
+    if any(token in tokens for token in ("中文", "汉语", "漢語", "普通话", "普通話", "国语", "國語")):
+        return "chinese"
+    if re.search(r"(^|[^a-z])en([^a-z]|$)", lower_tokens) or "english" in lower_tokens:
+        return "english"
+    if re.search(r"(^|[^a-z])(zh|cn|cmn)([^a-z]|$)", lower_tokens) or "chinese" in lower_tokens:
+        return "chinese"
+    return "unknown"
+
+
+def _classify_bilibili_subtitle_content_language(lines: list[LyricLine]) -> str:
+    if not lines:
+        return "unknown"
+
+    sample = " ".join(line.text for line in lines[:12]).strip()
+    if not sample:
+        return "unknown"
+
+    latin_count = _count_bilibili_latin_chars(sample)
+    cjk_count = _count_bilibili_cjk_chars(sample)
+
+    if latin_count >= max(8, cjk_count * 2):
+        return "english"
+    if cjk_count >= max(4, latin_count * 2):
+        return "chinese"
+    if latin_count > 0 and cjk_count > 0:
+        return "mixed"
+    return "unknown"
+
+
+def _score_bilibili_subtitle_candidate(candidate: dict, preference: str) -> float:
+    score = 0.0
+    language_hint = str(candidate.get("language_hint") or "unknown")
+    content_language = str(candidate.get("content_language") or "unknown")
+    is_auto = bool(candidate.get("is_auto"))
+    line_count = _coerce_non_negative_int(candidate.get("line_count")) or 0
+    order_index = _coerce_non_negative_int(candidate.get("order_index")) or 0
+
+    if preference == "english":
+        if language_hint == "english":
+            score += 70
+        elif language_hint == "bilingual":
+            score += 35
+        elif language_hint == "chinese":
+            score -= 25
+
+        if content_language == "english":
+            score += 120
+        elif content_language == "mixed":
+            score += 30
+        elif content_language == "chinese":
+            score -= 50
+    elif preference == "chinese":
+        if language_hint == "chinese":
+            score += 70
+        elif language_hint == "bilingual":
+            score += 30
+        elif language_hint == "english":
+            score -= 15
+
+        if content_language == "chinese":
+            score += 100
+        elif content_language == "mixed":
+            score += 25
+        elif content_language == "english":
+            score -= 25
+    else:
+        if content_language in {"english", "chinese"}:
+            score += 20
+        elif content_language == "mixed":
+            score += 10
+        if language_hint in {"english", "chinese", "bilingual"}:
+            score += 10
+
+    if is_auto:
+        score -= 3
+    else:
+        score += 6
+
+    score += min(line_count, 240) / 40.0
+    score -= order_index * 0.1
+    return score
+
+
+def _parse_bilibili_subtitle_body_to_lines(body: list[dict]) -> list[LyricLine]:
+    lyrics: list[LyricLine] = []
+    for entry in body:
+        if not isinstance(entry, dict):
+            continue
+
+        text = _clean_bilibili_text(
+            str(entry.get("content") or entry.get("subtitle") or entry.get("text") or "").replace("\n", " / ")
+        )
+        if not text:
+            continue
+
+        raw_time = entry.get("from")
+        if raw_time is None:
+            raw_time = entry.get("start")
+
+        try:
+            time_s = float(raw_time)
+        except (TypeError, ValueError):
+            continue
+
+        if not math.isfinite(time_s) or time_s < 0:
+            continue
+
+        if lyrics and abs(lyrics[-1].time - time_s) < 0.001 and lyrics[-1].text == text:
+            continue
+
+        lyrics.append(LyricLine(time=time_s, text=text))
+
+    lyrics.sort(key=lambda line: line.time)
+    return lyrics
+
+
 def _parse_bilibili_duration_ms(value: object) -> int | None:
     if isinstance(value, (int, float)):
         seconds = int(float(value))
@@ -1198,10 +1375,23 @@ def _build_bilibili_api_params(video_id: str) -> dict[str, object]:
     return {"bvid": normalized_video_id}
 
 
-def _request_bilibili_api_sync(path: str, params: dict[str, object], *, referer: str = "https://www.bilibili.com/") -> dict:
+def _build_bilibili_request_cookies(cookie: str | None = None) -> dict[str, str]:
+    cookies = cookie_string_to_dict(str(cookie or "").strip())
+    if not cookies.get("buvid3"):
+        cookies["buvid3"] = f"{uuid.uuid4()}infoc"
+    return cookies
+
+
+def _request_bilibili_api_sync(
+    path: str,
+    params: dict[str, object],
+    *,
+    referer: str = "https://www.bilibili.com/",
+    cookie: str | None = None,
+) -> dict:
     headers = dict(_BILIBILI_DEFAULT_HEADERS)
     headers["referer"] = referer
-    cookies = {"buvid3": f"{uuid.uuid4()}infoc"}
+    cookies = _build_bilibili_request_cookies(cookie)
 
     try:
         with httpx.Client(timeout=20.0, follow_redirects=True, headers=headers, cookies=cookies) as client:
@@ -1224,9 +1414,36 @@ def _request_bilibili_api_sync(path: str, params: dict[str, object], *, referer:
     return data
 
 
-def _fetch_bilibili_view_sync(video_id: str) -> dict:
+def _fetch_bilibili_view_sync(video_id: str, *, cookie: str | None = None) -> dict:
     params = _build_bilibili_api_params(video_id)
-    return _request_bilibili_api_sync("/x/web-interface/wbi/view", params, referer=_build_bilibili_video_url(video_id))
+    return _request_bilibili_api_sync(
+        "/x/web-interface/wbi/view",
+        params,
+        referer=_build_bilibili_video_url(video_id),
+        cookie=cookie,
+    )
+
+
+def _fetch_bilibili_nav_sync(cookie: str | None = None) -> dict:
+    headers = dict(_BILIBILI_DEFAULT_HEADERS)
+    headers["referer"] = "https://www.bilibili.com/"
+    cookies = _build_bilibili_request_cookies(cookie)
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True, headers=headers, cookies=cookies) as client:
+            resp = client.get("https://api.bilibili.com/x/web-interface/nav")
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"bilibili nav request failed: {exc}") from exc
+
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="bilibili nav returned invalid json") from exc
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="bilibili nav returned invalid data")
+    return data
 
 
 def _resolve_bilibili_primary_cid(view_data: dict) -> int | None:
@@ -1378,6 +1595,273 @@ def _fetch_bilibili_playurl_sync(video_id: str, cid: int, *, dash: bool = False)
         "fourk": 0,
     })
     return _request_bilibili_api_sync("/x/player/playurl", params, referer=_build_bilibili_video_url(video_id))
+
+
+def _fetch_bilibili_web_view_sync(video_id: str, *, cookie: str | None = None) -> dict:
+    params = _build_bilibili_api_params(video_id)
+    return _request_bilibili_api_sync(
+        "/x/web-interface/view",
+        params,
+        referer=_build_bilibili_video_url(video_id),
+        cookie=cookie,
+    )
+
+
+def _extract_bilibili_subtitle_catalog(player_data: dict) -> list[dict]:
+    subtitle_data = player_data.get("subtitle") if isinstance(player_data.get("subtitle"), dict) else {}
+    raw_subtitles = subtitle_data.get("subtitles") or subtitle_data.get("list") or []
+    if not isinstance(raw_subtitles, list):
+        return []
+
+    subtitles: list[dict] = []
+    for index, raw_subtitle in enumerate(raw_subtitles):
+        if not isinstance(raw_subtitle, dict):
+            continue
+
+        subtitle_url = _normalize_bilibili_subtitle_url(
+            raw_subtitle.get("subtitle_url") or raw_subtitle.get("url") or ""
+        )
+        if not subtitle_url:
+            continue
+
+        lan = str(raw_subtitle.get("lan") or "").strip()
+        lan_doc = str(raw_subtitle.get("lan_doc") or raw_subtitle.get("lang") or "").strip()
+        lowered_label = f"{lan} {lan_doc}".lower()
+        subtitles.append(
+            {
+                "subtitle_url": subtitle_url,
+                "lan": lan,
+                "lan_doc": lan_doc,
+                "order_index": index,
+                "is_auto": lan.lower().startswith("ai-")
+                or "自动" in lan_doc
+                or "auto" in lowered_label,
+            }
+        )
+    return subtitles
+
+
+def _fetch_bilibili_player_subtitle_catalog_sync(
+    video_id: str,
+    *,
+    aid: int,
+    cid: int,
+    cookie: str | None = None,
+) -> list[dict]:
+    referer = _build_bilibili_video_url(video_id)
+    params = {"aid": int(aid), "cid": int(cid)}
+    last_exc: HTTPException | None = None
+    saw_success = False
+
+    for path in ("/x/player/wbi/v2", "/x/player/v2"):
+        try:
+            player_data = _request_bilibili_api_sync(path, params, referer=referer, cookie=cookie)
+        except HTTPException as exc:
+            last_exc = exc
+            logger.warning("failed to fetch bilibili subtitle catalog for %s via %s: %s", video_id, path, exc.detail)
+            continue
+
+        saw_success = True
+        subtitles = _extract_bilibili_subtitle_catalog(player_data)
+        if subtitles:
+            return subtitles
+
+    if not saw_success and last_exc is not None:
+        raise last_exc
+    return []
+
+
+def _fetch_bilibili_subtitle_catalog_sync(video_id: str, *, cookie: str | None = None) -> list[dict]:
+    normalized_video_id = _extract_bilibili_video_id(video_id)
+    if not normalized_video_id:
+        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
+
+    try:
+        view_data = _fetch_bilibili_web_view_sync(normalized_video_id, cookie=cookie)
+    except HTTPException:
+        view_data = _fetch_bilibili_view_sync(normalized_video_id, cookie=cookie)
+
+    aid = _coerce_positive_int(view_data.get("aid"))
+    if aid is None and normalized_video_id.lower().startswith("av"):
+        aid = _coerce_positive_int(normalized_video_id[2:])
+    cid = _resolve_bilibili_primary_cid(view_data)
+    if aid is None or cid is None:
+        return []
+
+    return _fetch_bilibili_player_subtitle_catalog_sync(normalized_video_id, aid=aid, cid=cid, cookie=cookie)
+
+
+def _fetch_bilibili_subtitle_body_sync(subtitle_url: str, *, video_id: str, cookie: str | None = None) -> list[dict]:
+    url = _normalize_bilibili_subtitle_url(subtitle_url)
+    if not url:
+        return []
+
+    headers = dict(_BILIBILI_DEFAULT_HEADERS)
+    headers["referer"] = _build_bilibili_video_url(video_id)
+    cookies = _build_bilibili_request_cookies(cookie)
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True, headers=headers, cookies=cookies) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"bilibili subtitle request failed: {exc}") from exc
+
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="bilibili subtitle returned invalid json") from exc
+
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if not isinstance(body, list):
+        return []
+    return [entry for entry in body if isinstance(entry, dict)]
+
+
+def _resolve_bilibili_lyrics_from_candidates_sync(
+    video_id: str,
+    subtitles: list[dict],
+    *,
+    title: str = "",
+    artist: str = "",
+    cookie: str | None = None,
+) -> list[LyricLine]:
+    if not subtitles:
+        return []
+
+    preference = _infer_bilibili_subtitle_preference(title, artist)
+    candidates: list[dict] = []
+    for subtitle in subtitles:
+        body = subtitle.get("body") if isinstance(subtitle.get("body"), list) else None
+        if body is None:
+            try:
+                body = _fetch_bilibili_subtitle_body_sync(
+                    str(subtitle.get("subtitle_url") or ""),
+                    video_id=video_id,
+                    cookie=cookie,
+                )
+            except HTTPException as exc:
+                logger.warning(
+                    "failed to fetch bilibili subtitle for %s (%s): %s",
+                    video_id,
+                    subtitle.get("lan") or subtitle.get("lan_doc") or "unknown",
+                    exc.detail,
+                )
+                continue
+
+        lyrics = _parse_bilibili_subtitle_body_to_lines(body)
+        if not lyrics:
+            continue
+
+        candidate = dict(subtitle)
+        candidate["lyrics"] = lyrics
+        candidate["line_count"] = len(lyrics)
+        candidate["language_hint"] = _classify_bilibili_subtitle_language(candidate)
+        candidate["content_language"] = _classify_bilibili_subtitle_content_language(lyrics)
+        candidate["score"] = _score_bilibili_subtitle_candidate(candidate, preference)
+        candidates.append(candidate)
+
+    if not candidates:
+        return []
+
+    clean_title = _clean_bilibili_text(title)
+    title_latin_count = _count_bilibili_latin_chars(clean_title)
+    title_cjk_count = _count_bilibili_cjk_chars(clean_title)
+    if title_latin_count >= 4:
+        for candidate in candidates:
+            if candidate.get("content_language") == "english":
+                candidate["score"] = float(candidate.get("score") or 0.0) + 25.0
+            elif candidate.get("language_hint") == "english":
+                candidate["score"] = float(candidate.get("score") or 0.0) + 10.0
+            elif candidate.get("content_language") == "chinese" and title_latin_count > title_cjk_count:
+                candidate["score"] = float(candidate.get("score") or 0.0) - 10.0
+
+    candidates.sort(
+        key=lambda candidate: (
+            float(candidate.get("score") or 0.0),
+            len(candidate.get("lyrics") or []),
+            -int(candidate.get("order_index") or 0),
+        ),
+        reverse=True,
+    )
+    return list(candidates[0].get("lyrics") or [])
+
+
+def _fetch_bilibili_lyrics_sync(video_id: str, *, title: str = "", artist: str = "") -> list[LyricLine]:
+    normalized_video_id = _extract_bilibili_video_id(video_id)
+    if not normalized_video_id:
+        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
+
+    subtitles = _fetch_bilibili_subtitle_catalog_sync(normalized_video_id)
+    lyrics = _resolve_bilibili_lyrics_from_candidates_sync(
+        normalized_video_id,
+        subtitles,
+        title=title,
+        artist=artist,
+    )
+    if lyrics:
+        return lyrics
+
+    admin_cookie = _get_admin_bilibili_cookie_or_none()
+    if admin_cookie:
+        auth_subtitles = _fetch_bilibili_subtitle_catalog_sync(normalized_video_id, cookie=admin_cookie)
+        lyrics = _resolve_bilibili_lyrics_from_candidates_sync(
+            normalized_video_id,
+            auth_subtitles,
+            title=title,
+            artist=artist,
+            cookie=admin_cookie,
+        )
+        if lyrics:
+            return lyrics
+
+        playwright_candidates = asyncio.run(
+            fetch_bilibili_subtitle_candidates_via_playwright(normalized_video_id, admin_cookie)
+        )
+        lyrics = _resolve_bilibili_lyrics_from_candidates_sync(
+            normalized_video_id,
+            playwright_candidates,
+            title=title,
+            artist=artist,
+            cookie=admin_cookie,
+        )
+        if lyrics:
+            return lyrics
+
+    return []
+
+
+async def _fetch_bilibili_lyrics(video_id: str, *, title: str = "", artist: str = "") -> list[LyricLine]:
+    normalized_video_id = _extract_bilibili_video_id(video_id)
+    if not normalized_video_id:
+        return []
+
+    preference = _infer_bilibili_subtitle_preference(title, artist)
+    admin_cookie = _get_admin_bilibili_cookie_or_none()
+    auth_scope = "anon"
+    if admin_cookie:
+        auth_scope = hashlib.sha256(admin_cookie.encode("utf-8")).hexdigest()[:10]
+    cache_key = f"{normalized_video_id}|{preference}|{auth_scope}"
+    cached = _bilibili_subtitle_cache.get(cache_key)
+    now = time.time()
+    if cached is not None and cached[0] > now:
+        return list(cached[1])
+
+    try:
+        lyrics = await asyncio.to_thread(
+            _fetch_bilibili_lyrics_sync,
+            normalized_video_id,
+            title=title,
+            artist=artist,
+        )
+    except HTTPException as exc:
+        logger.warning("failed to resolve bilibili lyrics for %s: %s", normalized_video_id, exc.detail)
+        return []
+    except Exception as exc:
+        logger.warning("failed to resolve bilibili lyrics for %s: %s", normalized_video_id, exc)
+        return []
+
+    _bilibili_subtitle_cache[cache_key] = (time.time() + _BILIBILI_SUBTITLE_CACHE_TTL_S, list(lyrics))
+    return lyrics
 
 
 def _extract_bilibili_playurl_download_target(playurl_data: dict) -> tuple[str, str]:
@@ -2158,6 +2642,8 @@ async def lyrics(queue_item_id: int) -> LyricsResponse:
         if not item:
             raise HTTPException(status_code=404, detail="not found")
         track_id = str(item.track_id or "")
+        title = str(item.title or "")
+        artist = str(item.artist or "")
     finally:
         session.close()
 
@@ -2197,6 +2683,13 @@ async def lyrics(queue_item_id: int) -> LyricsResponse:
             return LyricsResponse(lyrics=_parse_lrc_to_lines(str(lrc)))
         except Exception:
             return LyricsResponse(lyrics=[])
+
+    elif track_id.startswith("bilibili:"):
+        video_id = _extract_bilibili_video_id(track_id.split(":", 1)[1])
+        if not video_id:
+            return LyricsResponse(lyrics=[])
+        lyrics = await _fetch_bilibili_lyrics(video_id, title=title, artist=artist)
+        return LyricsResponse(lyrics=lyrics)
     
     else:
         return LyricsResponse(lyrics=[])
@@ -2462,6 +2955,16 @@ def _get_admin_qqmusic_cookie(session: Session) -> str:
         return decrypt_text(row.value)
     except Exception:
         raise HTTPException(status_code=500, detail="failed to decrypt admin qqmusic cookie")
+
+
+def _get_admin_bilibili_cookie(session: Session) -> str:
+    row = session.get(Secret, "bilibili_cookie")
+    if not row:
+        raise HTTPException(status_code=400, detail="admin bilibili cookie not set")
+    try:
+        return decrypt_text(row.value)
+    except Exception:
+        raise HTTPException(status_code=500, detail="failed to decrypt admin bilibili cookie")
 
 
 def _require_admin_token(request: Request) -> None:
@@ -4175,6 +4678,17 @@ def _get_admin_cookie_or_none() -> str | None:
         return None
 
 
+def _get_admin_bilibili_cookie_or_none() -> str | None:
+    try:
+        session = new_session()
+        try:
+            return _get_admin_bilibili_cookie(session)
+        finally:
+            session.close()
+    except HTTPException:
+        return None
+
+
 # QQ 音乐 API 端点
 
 @app.get("/bilibili/search/videos")
@@ -4385,6 +4899,111 @@ async def admin_qqmusic_qr_confirm(
     else:
         print(f"[DEBUG] QR confirm - no cookie to save")
     return {"ok": True, "admin_cookie_set": bool(c), "uin": qqmusic.get_uin(), "raw": r}
+
+
+@app.get("/admin/bilibili/status")
+async def admin_bilibili_status(request: Request, session: Session = Depends(get_session)) -> dict:
+    _require_admin_token(request)
+    row = session.get(Secret, "bilibili_cookie")
+    return {
+        "admin_cookie_set": bool(row and row.value),
+        "playwright_available": await is_playwright_runtime_available(),
+        "playwright_dependency_installed": is_playwright_available(),
+    }
+
+
+@app.get("/admin/bilibili/account")
+async def admin_bilibili_account(request: Request, session: Session = Depends(get_session)) -> dict:
+    _require_admin_token(request)
+    cookie = _get_admin_bilibili_cookie(session)
+    data = await asyncio.to_thread(_fetch_bilibili_nav_sync, cookie)
+    return {
+        "mid": data.get("mid"),
+        "uname": data.get("uname") or "",
+        "level_info": data.get("level_info") or {},
+        "is_login": bool(data.get("isLogin")),
+    }
+
+
+@app.post("/admin/bilibili/cookie")
+async def admin_bilibili_set_cookie(
+    req: AdminCookieSetRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_admin_token(request)
+    c = (req.cookie or "").strip()
+    if not c:
+        raise HTTPException(status_code=400, detail="cookie is empty")
+    if c.lower().startswith("cookie:"):
+        c = c.split(":", 1)[1].strip()
+    c = c.replace("\r", "").replace("\n", "")
+    nav = await asyncio.to_thread(_fetch_bilibili_nav_sync, c)
+    if not bool(nav.get("isLogin")):
+        raise HTTPException(status_code=400, detail="bilibili cookie is not logged in")
+    _set_secret(session, "bilibili_cookie", c)
+    return {
+        "ok": True,
+        "admin_cookie_set": True,
+        "mid": nav.get("mid"),
+        "uname": nav.get("uname") or "",
+    }
+
+
+@app.post("/admin/bilibili/qr/start")
+async def admin_bilibili_qr_start(request: Request) -> dict:
+    _require_admin_token(request)
+    try:
+        return await start_bilibili_qr_login_session()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/admin/bilibili/qr/check")
+async def admin_bilibili_qr_check(
+    session_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_admin_token(request)
+    try:
+        result = await poll_bilibili_qr_login_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if result.get("status") == "authorized":
+        cookie = str(result.get("cookie") or "").strip()
+        if cookie:
+            _set_secret(session, "bilibili_cookie", cookie)
+            try:
+                nav = await asyncio.to_thread(_fetch_bilibili_nav_sync, cookie)
+            except Exception as exc:
+                logger.warning("failed to fetch bilibili account after qr auth: %s", exc)
+                nav = {}
+            return {
+                "status": "authorized",
+                "code": result.get("code"),
+                "message": result.get("message"),
+                "admin_cookie_set": True,
+                "mid": nav.get("mid"),
+                "uname": nav.get("uname") or "",
+            }
+        return {
+            "status": "authorized",
+            "code": result.get("code"),
+            "message": "扫码已确认，但未拿到完整登录 Cookie，请重试一次",
+            "admin_cookie_set": False,
+        }
+
+    return {
+        "status": result.get("status"),
+        "code": result.get("code"),
+        "message": result.get("message"),
+        "admin_cookie_set": False,
+        "raw": result.get("raw"),
+    }
 
 
 @app.post("/qqmusic/login/cookie")

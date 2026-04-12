@@ -677,7 +677,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/search` | 网易云搜索，返回原始结构包装在 `raw` 里 |
-| `GET` | `/lyrics/{queue_item_id}` | 读取队列项歌词 |
+| `GET` | `/lyrics/{queue_item_id}` | 读取队列项歌词；B 站队列项会在可用时返回视频字幕时间轴，并在配置管理员 B 站登录态时尝试补抓 AI 字幕 |
 | `GET` | `/playlist/detail` | 按请求头里的 `x-netease-cookie` 查询歌单详情 |
 
 ### 7.1 `GET /search`
@@ -709,6 +709,8 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 - 队列项不存在时返回 `404`
 - 网易云会优先尝试服务端管理员 cookie
 - QQ 音乐会尝试使用服务端管理员 QQ 音乐 cookie
+- B 站队列项会尝试读取视频字幕，并按歌曲标题/歌手倾向选择更合适的语言轨道
+- 如果配置了管理员 B 站 Cookie，后端会在公开视频接口拿不到字幕时继续尝试登录态 API 和 Playwright 页面抓取
 
 ## 8. 网易云接口 `/netease/*`
 
@@ -944,6 +946,51 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
   "auth_url": "https://graph.qq.com/..."
 }
 ```
+
+### 11.3 B 站管理员接口
+
+| 方法 | 路径 | 是否需要 admin token | 说明 |
+| --- | --- | --- | --- |
+| `GET` | `/admin/bilibili/status` | 是 | 是否已保存管理员 B 站 cookie，以及 Playwright 是否可用 |
+| `GET` | `/admin/bilibili/account` | 是 | 当前管理员 B 站账号信息 |
+| `POST` | `/admin/bilibili/cookie` | 是 | 写入管理员 B 站 cookie |
+| `POST` | `/admin/bilibili/qr/start` | 是 | 创建 B 站二维码登录会话并返回二维码图片 |
+| `GET` | `/admin/bilibili/qr/check` | 是 | 轮询二维码登录状态，授权成功时保存管理员 cookie |
+
+`POST /admin/bilibili/cookie` 请求体：
+
+```json
+{
+  "cookie": "SESSDATA=...; bili_jct=..."
+}
+```
+
+`GET /admin/bilibili/status` 响应示例：
+
+```json
+{
+  "admin_cookie_set": true,
+  "playwright_available": true,
+  "playwright_dependency_installed": true
+}
+```
+
+`POST /admin/bilibili/qr/start` 响应示例：
+
+```json
+{
+  "session_id": "5f8f5c4e...",
+  "qrcode_key": "bfb1d1caaffe7fac02522b3b32089d70",
+  "qr_url": "https://account.bilibili.com/...",
+  "qr_image_base64": "iVBORw0KGgoAAA..."
+}
+```
+
+`GET /admin/bilibili/qr/check` 查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `session_id` | string | 是 | `POST /admin/bilibili/qr/start` 返回的登录会话 ID |
 
 ## 12. 常见调用流程
 

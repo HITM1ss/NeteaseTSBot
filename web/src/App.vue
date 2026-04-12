@@ -3,19 +3,26 @@ import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import MusicPlayer from './components/MusicPlayer.vue'
 import { appConfig } from './appConfig'
+import { applyTheme, getInitialTheme } from './theme'
 import { 
   Home, 
+  Music,
   Search, 
   Heart, 
   ListMusic, 
   Clock, 
   Settings,
+  Github,
+  Moon,
+  Sun,
   Menu,
   X
 } from 'lucide-vue-next'
 
 const sidebarOpen = ref(false)
 const appName = appConfig.name
+const themeMode = ref<'light' | 'dark'>(getInitialTheme())
+const isDarkMode = computed(() => themeMode.value === 'dark')
 
 const route = useRoute()
 const isLyricsRoute = computed(() => route.name === 'lyrics' || route.path.startsWith('/lyrics'))
@@ -23,10 +30,15 @@ const isLyricsRoute = computed(() => route.name === 'lyrics' || route.path.start
 function toggleSidebar() {
   sidebarOpen.value = !sidebarOpen.value
 }
+
+function toggleTheme() {
+  themeMode.value = isDarkMode.value ? 'light' : 'dark'
+  applyTheme(themeMode.value)
+}
 </script>
 
 <template>
-  <div :class="['min-h-screen transition-colors duration-300', isLyricsRoute ? 'bg-black h-[100dvh] overflow-hidden' : 'bg-gray-50 pb-24']">
+  <div :class="['app-shell min-h-screen transition-colors duration-300', isLyricsRoute ? 'bg-black h-[100dvh] overflow-hidden' : 'bg-gray-50 pb-24']">
     <template v-if="isLyricsRoute">
       <div class="h-full relative z-0">
         <RouterView />
@@ -44,7 +56,7 @@ function toggleSidebar() {
       <!-- Sidebar -->
       <aside 
         :class="[
-          'fixed top-0 left-0 h-full w-64 bg-white/95 backdrop-blur-sm border-r border-gray-200 z-50 transform transition-transform duration-300 ease-out shadow-[4px_0_24px_rgba(0,0,0,0.02)]',
+          'theme-sidebar-shell fixed top-0 left-0 h-full w-64 bg-white/95 backdrop-blur-sm border-r border-gray-200 z-50 transform transition-transform duration-300 ease-out shadow-[4px_0_24px_rgba(0,0,0,0.02)]',
           sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         ]"
       >
@@ -131,7 +143,7 @@ function toggleSidebar() {
           </nav>
           
           <!-- User/Settings Footer -->
-          <div class="p-4 border-t border-gray-100 bg-gray-50/50">
+          <div class="theme-sidebar-footer p-4 border-t border-gray-100 bg-gray-50/50">
             <RouterLink 
               to="/cookie" 
               class="nav-item"
@@ -147,7 +159,7 @@ function toggleSidebar() {
       <!-- Main content -->
       <div class="lg:ml-64 flex flex-col h-[100dvh]">
         <!-- Top bar -->
-        <header class="bg-white border-b border-gray-200 px-4 md:px-6 py-3 md:py-4 flex-shrink-0 flex items-center justify-between">
+        <header class="theme-topbar-shell bg-white border-b border-gray-200 px-4 md:px-6 py-3 md:py-4 flex-shrink-0 flex items-center justify-between">
           <div class="flex items-center gap-4">
             <button 
               @click="toggleSidebar"
@@ -158,9 +170,30 @@ function toggleSidebar() {
           </div>
           
           <div class="flex items-center gap-2">
+            <a
+              href="https://github.com/yichen11818"
+              target="_blank"
+              rel="noreferrer"
+              class="theme-toolbar-btn p-2 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+              title="GitHub 主页"
+            >
+              <Github :size="20" />
+            </a>
+            <button
+              type="button"
+              :class="[
+                'theme-toolbar-btn p-2 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors',
+                isDarkMode ? 'theme-toolbar-btn-active' : ''
+              ]"
+              :title="isDarkMode ? '切换到浅色模式' : '切换到夜间模式'"
+              @click="toggleTheme"
+            >
+              <Moon v-if="!isDarkMode" :size="20" />
+              <Sun v-else :size="20" />
+            </button>
             <RouterLink
               to="/cookie"
-              class="p-2 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+              class="theme-toolbar-btn p-2 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
               title="设置"
             >
               <Settings :size="20" />

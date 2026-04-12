@@ -1,5 +1,5 @@
 <template>
-  <div class="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-lg border-t border-gray-200 shadow-[0_-4px_20px_rgba(0,0,0,0.05)] z-50 transition-all duration-300">
+  <div class="theme-player-shell fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-lg border-t border-gray-200 shadow-[0_-4px_20px_rgba(0,0,0,0.05)] z-50 transition-all duration-300">
     <!-- Progress Bar (Floating on top or integrated) -->
     <div 
       class="absolute top-0 left-0 right-0 h-1 bg-transparent group cursor-pointer"
@@ -161,7 +161,7 @@
             <MoreHorizontal :size="20" />
           </button>
 
-          <div v-if="showFxPanel" class="absolute bottom-full right-4 mb-3 w-80 bg-white border border-gray-200 rounded-xl shadow-xl p-4">
+          <div v-if="showFxPanel" class="theme-floating-panel absolute bottom-full right-4 mb-3 w-80 bg-white border border-gray-200 rounded-xl shadow-xl p-4">
             <div class="flex items-center justify-between mb-3">
               <div class="text-sm font-semibold text-gray-900">音效</div>
               <button class="p-1 text-gray-400 hover:text-gray-700" @click="showFxPanel = false">✕</button>
