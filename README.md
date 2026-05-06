@@ -282,6 +282,8 @@ cp tsbot.env.example tsbot.env
 docker compose up -d --build
 ```
 
+当前仓库内置的 `backend` 镜像会在构建阶段自动安装 Playwright Chromium 及其系统依赖，因此正常情况下不需要再手动 `docker exec` 进入容器执行 `python -m playwright install chromium`。如果你更新了仓库里的 `Dockerfile.backend` 或切换了镜像版本，请重新执行带 `--build` 的启动命令，确保新的浏览器运行时已经写入镜像。
+
 ### 3) 查看状态与日志
 
 ```bash

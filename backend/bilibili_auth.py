@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import re
 import time
 import uuid
@@ -89,6 +90,17 @@ def _ensure_playwright_available() -> None:
         )
 
 
+def _get_playwright_launch_kwargs() -> dict[str, Any]:
+    args = ["--disable-dev-shm-usage"]
+    try:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            # Chromium needs sandbox flags when launched as root inside Docker.
+            args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
+    except Exception:
+        pass
+    return {"headless": True, "args": args}
+
+
 async def _probe_playwright_runtime_available() -> bool:
     if async_playwright is None:
         return False
@@ -98,10 +110,7 @@ async def _probe_playwright_runtime_available() -> bool:
     try:
         playwright = await async_playwright().start()
         browser = await asyncio.wait_for(
-            playwright.chromium.launch(
-                headless=True,
-                args=["--disable-dev-shm-usage"],
-            ),
+            playwright.chromium.launch(**_get_playwright_launch_kwargs()),
             timeout=_PLAYWRIGHT_RUNTIME_CHECK_TIMEOUT_S,
         )
         return True
@@ -527,7 +536,7 @@ async def fetch_bilibili_subtitle_candidates_via_playwright(video_id: str, cooki
         if not cookie.strip():
             return []
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(**_get_playwright_launch_kwargs())
         context = await browser.new_context(
             locale="zh-CN",
             viewport={"width": 1440, "height": 900},
