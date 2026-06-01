@@ -134,6 +134,31 @@ B 站能力由后端直接适配，不需要额外部署独立 API 服务。
 
 ## 快速开始（推荐）
 
+### 0) 使用 Codex 一键安装（可选）
+
+如果你正在使用 OpenAI Codex，可以在一个空目录或目标部署目录中直接让 Codex 代劳克隆、安装依赖、构建并启动项目。
+
+在 Codex 中粘贴下面这段提示词即可：
+
+```text
+请帮我一键安装并启动 TSBot：
+
+1. 如果当前目录还没有项目代码，请执行：
+   git clone ssh://git@ssh.github.com:443/yichen11818/NeteaseTSBot.git tsbot
+   cd tsbot
+   如果 SSH 拉取失败，请改用：
+   git clone https://github.com/yichen11818/NeteaseTSBot.git tsbot
+2. 检查 Linux 环境是否具备 python3、pip、venv、node/npm、rust/cargo、cmake、build-essential、ffmpeg。
+3. 在项目根目录执行 chmod +x setup.sh run-*.sh nohup-*.sh。
+4. 执行 ./setup.sh 安装后端、前端和 voice-service 依赖并完成构建。
+5. 如果 tsbot.env 不存在，请从 tsbot.env.example 复制；如果已存在，不要覆盖。
+6. 提醒我填写 tsbot.env 中的 TSBOT_TS3_HOST、TSBOT_TS3_PORT、TSBOT_TS3_CHANNEL_ID、TSBOT_COOKIE_KEY，以及需要的音乐源配置。
+7. 我确认配置完成后，执行 ./nohup-start.sh 启动服务，再执行 ./nohup-status.sh 检查状态。
+8. 最后告诉我 Web 控制台地址、后端 OpenAPI 地址和日志文件位置。
+```
+
+如果你已经手动克隆到了本仓库目录，也可以把第 1 步改成“使用当前目录，不要重新 clone”。Codex 执行到需要填写 `tsbot.env` 时应暂停并让你补齐配置；不要把真实 Cookie、token 或服务器密码直接发给 Codex，建议在本机编辑器里修改 `tsbot.env`。
+
 ### 1) 配置环境变量
 
 复制模板并修改：
