@@ -3871,6 +3871,17 @@ async def admin_qr_check(key: str, request: Request, session: Session = Depends(
     code = (data or {}).get("code")
     cookie = (data or {}).get("cookie") or ""
     if code == 803 and cookie:
+        target_keys = {
+            "music_r_t", "music_a_t", "music_r_u", 
+            "music_sns", "nmtid", "__csrf", "music_u"
+        }
+        pairs = re.findall(r"([^;\s=]+)\s*=\s*([^;]*)", cookie)
+        result = {}
+        for key, value in pairs:
+            k_stripped = key.strip()
+            if k_stripped.lower() in target_keys:
+                result[k_stripped] = value.strip()
+        cookie = "; ".join(f"{k}={v}" for k, v in result.items())
         _set_secret(session, "netease_cookie", cookie)
         return {"code": code, "message": "authorized", "admin_cookie_set": True}
     if code == 800:
