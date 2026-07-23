@@ -9,6 +9,7 @@ services:
       - "50051:50051"
     volumes:
       - ./logs:/app/logs
+      - voicetmp:/app/tmp
 
   backend:
     build:
@@ -28,6 +29,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
+      - voicetmp:/app/tmp
 
   web:
     build:
@@ -37,3 +39,6 @@ services:
       - backend
     ports:
       - "8080:8080"
+
+volumes:
+  voicetmp:
