@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from .bilibili_cache import prune_audio_cache
 from .bilibili_auth import (
     close_all_bilibili_qr_sessions,
     cookie_string_to_dict,
@@ -55,6 +56,9 @@ voice = VoiceClient()
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BILIBILI_AUDIO_DIR = REPO_ROOT / "tmp" / "bilibili_audio"
+BILIBILI_AUDIO_CACHE_TTL_SECONDS = max(0, settings.bilibili_audio_cache_ttl_hours) * 3600
+BILIBILI_AUDIO_CACHE_MAX_BYTES = max(0, settings.bilibili_audio_cache_max_mb) * 1024 * 1024
+BILIBILI_AUDIO_PARTIAL_TTL_SECONDS = max(0, settings.bilibili_audio_partial_ttl_minutes) * 60
 _BILIBILI_VIDEO_ID_RE = re.compile(r"(BV[0-9A-Za-z]+|av\d+)", re.IGNORECASE)
 _BILIBILI_TAG_RE = re.compile(r"<[^>]+>")
 _BILIBILI_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -1968,6 +1972,21 @@ def _find_cached_bilibili_audio(video_id: str) -> str:
     if not BILIBILI_AUDIO_DIR.exists():
         return ""
 
+    requested_paths = set(BILIBILI_AUDIO_DIR.glob(f"{video_id}.*"))
+    prune_result = prune_audio_cache(
+        BILIBILI_AUDIO_DIR,
+        max_bytes=BILIBILI_AUDIO_CACHE_MAX_BYTES,
+        ttl_seconds=BILIBILI_AUDIO_CACHE_TTL_SECONDS,
+        partial_ttl_seconds=BILIBILI_AUDIO_PARTIAL_TTL_SECONDS,
+        protected_paths=requested_paths,
+    )
+    if prune_result.removed_files:
+        logger.info(
+            "pruned %s Bilibili audio cache files (%s bytes)",
+            prune_result.removed_files,
+            prune_result.removed_bytes,
+        )
+
     candidates: list[Path] = []
     for path in BILIBILI_AUDIO_DIR.glob(f"{video_id}.*"):
         if not path.is_file():
@@ -1989,7 +2008,14 @@ def _find_cached_bilibili_audio(video_id: str) -> str:
         ".webm": 22,
     }
     candidates.sort(key=lambda path: (extension_priority.get(path.suffix.lower(), 100), path.name))
-    return str(candidates[0].resolve()) if candidates else ""
+    if not candidates:
+        return ""
+    selected = candidates[0]
+    try:
+        selected.touch()
+    except OSError:
+        pass
+    return str(selected.resolve())
 
 
 def _extract_bilibili_video_info_sync(video_id: str) -> dict:

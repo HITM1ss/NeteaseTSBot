@@ -27,6 +27,9 @@ class Settings(BaseSettings):
 
     admin_token: str = ""
     bilibili_max_duration_minutes: int = 180
+    bilibili_audio_cache_ttl_hours: int = 72
+    bilibili_audio_cache_max_mb: int = 2048
+    bilibili_audio_partial_ttl_minutes: int = 60
 
     def get_api_tokens(self) -> list[str]:
         tokens: list[str] = []

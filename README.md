@@ -131,6 +131,7 @@ B 站能力由后端直接适配，不需要额外部署独立 API 服务。
 - 可通过 Web 控制台或 `/admin/bilibili/*` 接口保存管理员 B 站 Cookie，用于登录态 API 和 Playwright 抓取 AI 字幕。
 - 当公开视频接口拿不到字幕轨时，后端会在存在管理员 B 站 Cookie 的前提下，尝试使用登录态接口和 Playwright 页面环境补抓 AI 字幕。
 - 可通过 `TSBOT_BILIBILI_MAX_DURATION_MINUTES` 限制允许点播的最长视频时长，避免超长视频拖垮播放链路。
+- 音频缓存默认保留 72 小时且上限为 2 GiB，可通过 `TSBOT_BILIBILI_AUDIO_CACHE_TTL_HOURS`、`TSBOT_BILIBILI_AUDIO_CACHE_MAX_MB` 和 `TSBOT_BILIBILI_AUDIO_PARTIAL_TTL_MINUTES` 调整。
 
 ## 快速开始（推荐）
 
