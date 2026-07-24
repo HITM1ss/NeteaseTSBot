@@ -7,6 +7,7 @@ services:
       - "50051:50051"
     volumes:
       - ./logs:/app/logs
+      - voicetmp:/app/tmp
 
   backend:
     image: ${TSBOT_IMAGE_REGISTRY:-docker.io}/${TSBOT_IMAGE_NAMESPACE:-yumi118}/${TSBOT_IMAGE_REPO:-neteasetsbot}-backend:${TSBOT_IMAGE_TAG:-latest}
@@ -24,6 +25,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
+      - voicetmp:/app/tmp
 
   web:
     image: ${TSBOT_IMAGE_REGISTRY:-docker.io}/${TSBOT_IMAGE_NAMESPACE:-yumi118}/${TSBOT_IMAGE_REPO:-neteasetsbot}-web:${TSBOT_IMAGE_TAG:-latest}
@@ -31,3 +33,6 @@ services:
       - backend
     ports:
       - "8080:8080"
+
+volumes:
+  voicetmp:
