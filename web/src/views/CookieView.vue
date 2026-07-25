@@ -748,9 +748,13 @@ async function checkAdminQr() {
     const r = await apiGet<any>(`/admin/qr/check?key=${encodeURIComponent(adminQrKey.value)}`, getAdminHeaders())
     const code = Number(r?.code)
     if (code === 803) {
-      status.value = 'admin authorized (cookie saved server-side)'
+      if (r?.admin_cookie_set) {
+        status.value = 'admin authorized (cookie saved server-side)'
+        await load()
+      } else {
+        status.value = String(r?.message || 'admin authorized, but no usable cookie was returned')
+      }
       stopAdminPoll()
-      await load()
       return
     }
     if (code === 800) {

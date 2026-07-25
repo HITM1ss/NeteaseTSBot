@@ -34,6 +34,7 @@ from .crypto import decrypt_text, encrypt_text
 from .db import create_db_and_tables, get_database_url, get_session, get_sqlite_db_path, new_session
 from .models import HistoryItem, QueueItem, Secret
 from .netease import NeteaseClient
+from .netease_cookie import extract_netease_auth_cookie, has_netease_auth_cookie
 from .qqmusic import QQMusicClient
 from .voice_client import VoiceClient
 from .config import settings
@@ -2968,9 +2969,12 @@ def _get_admin_cookie(session: Session) -> str:
     if not row:
         raise HTTPException(status_code=400, detail="admin netease cookie not set")
     try:
-        return decrypt_text(row.value)
+        cookie = decrypt_text(row.value).strip()
     except Exception:
         raise HTTPException(status_code=500, detail="failed to decrypt admin netease cookie")
+    if not has_netease_auth_cookie(cookie):
+        raise HTTPException(status_code=400, detail="admin netease cookie not set")
+    return cookie
 
 
 def _get_admin_qqmusic_cookie(session: Session) -> str:
@@ -3767,7 +3771,13 @@ def _set_secret(session: Session, key: str, plaintext: str) -> None:
 @app.get("/admin/status")
 def admin_status(session: Session = Depends(get_session)) -> dict:
     row = session.get(Secret, "netease_cookie")
-    return {"admin_cookie_set": bool(row and row.value)}
+    if not row or not row.value:
+        return {"admin_cookie_set": False}
+    try:
+        cookie = decrypt_text(row.value).strip()
+    except Exception:
+        cookie = ""
+    return {"admin_cookie_set": has_netease_auth_cookie(cookie)}
 
 
 @app.get("/admin/account")
@@ -3874,6 +3884,8 @@ def admin_set_cookie(
     if c.lower().startswith("cookie:"):
         c = c.split(":", 1)[1].strip()
     c = c.replace("\r", "").replace("\n", "")
+    if not has_netease_auth_cookie(c):
+        raise HTTPException(status_code=400, detail="cookie does not contain a usable netease auth token")
     _set_secret(session, "netease_cookie", c)
     return {"ok": True, "admin_cookie_set": True}
 
@@ -3895,19 +3907,14 @@ async def admin_qr_check(key: str, request: Request, session: Session = Depends(
     _require_admin_token(request)
     data = await netease.qr_check(key)
     code = (data or {}).get("code")
-    cookie = (data or {}).get("cookie") or ""
-    if code == 803 and cookie:
-        target_keys = {
-            "music_r_t", "music_a_t", "music_r_u", 
-            "music_sns", "nmtid", "__csrf", "music_u"
-        }
-        pairs = re.findall(r"([^;\s=]+)\s*=\s*([^;]*)", cookie)
-        result = {}
-        for key, value in pairs:
-            k_stripped = key.strip()
-            if k_stripped.lower() in target_keys:
-                result[k_stripped] = value.strip()
-        cookie = "; ".join(f"{k}={v}" for k, v in result.items())
+    if code == 803:
+        cookie = extract_netease_auth_cookie(str((data or {}).get("cookie") or ""))
+        if not cookie:
+            return {
+                "code": code,
+                "message": "authorized but no usable authentication cookie was returned",
+                "admin_cookie_set": False,
+            }
         _set_secret(session, "netease_cookie", cookie)
         return {"code": code, "message": "authorized", "admin_cookie_set": True}
     if code == 800:
