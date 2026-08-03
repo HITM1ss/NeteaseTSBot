@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
@@ -169,6 +170,166 @@ class NeteaseQrCookieTests(unittest.IsolatedAsyncioTestCase):
             "netease_cookie",
             "MUSIC_U=valid-token; __csrf=csrf-token",
         )
+
+
+class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        main._ts_playlist_results.clear()
+
+    async def test_playlist_search_then_select_enqueues_netease_tracks(self) -> None:
+        search_result = {
+            "result": {
+                "playlists": [
+                    {
+                        "id": 123,
+                        "name": "测试歌单",
+                        "creator": {"nickname": "创建者"},
+                        "trackCount": 2,
+                    }
+                ]
+            }
+        }
+        tracks = [
+            {"id": 1, "name": "歌曲一", "ar": [{"name": "歌手一"}], "al": {"name": "专辑一"}},
+            {"id": 2, "name": "歌曲二", "ar": [{"name": "歌手二"}], "al": {"name": "专辑二"}},
+        ]
+
+        with (
+            patch.object(main.netease, "search", AsyncMock(return_value=search_result)) as search,
+            patch.object(main.netease, "playlist_detail", AsyncMock(return_value={"playlist": {"name": "测试歌单"}})),
+            patch.object(main, "_load_netease_playlist_tracks", AsyncMock(return_value=("测试歌单", tracks))),
+            patch.object(main, "_enqueue_netease_song", AsyncMock(return_value=(1, False))) as enqueue,
+            patch.object(main, "_get_admin_cookie_or_none", return_value="cookie"),
+            patch.object(main.voice, "get_status", AsyncMock(return_value=SimpleNamespace(state="STATE_PLAYING"))),
+            patch.object(main.voice, "send_notice", AsyncMock()) as notice,
+        ):
+            await main._handle_chat_command("Alice", "playlist 测试", invoker_unique_id="alice-uid")
+            await main._handle_chat_command("Alice", "select 1", invoker_unique_id="alice-uid")
+
+        search.assert_awaited_once_with(keywords="测试", limit=5, type_=1000)
+        self.assertEqual(2, enqueue.await_count)
+        self.assertEqual("1", enqueue.await_args_list[0].kwargs["song_id"])
+        self.assertEqual("2", enqueue.await_args_list[1].kwargs["song_id"])
+        self.assertIn("使用 select <编号>", notice.await_args_list[0].args[0])
+        self.assertIn("已从歌单《测试歌单》加入 2 首歌曲", notice.await_args_list[1].args[0])
+
+    async def test_play_without_argument_plays_first_queue_item(self) -> None:
+        row = SimpleNamespace(id=42, title="队首歌曲", artist="歌手")
+        session = unittest.mock.Mock()
+        session.execute.return_value.scalars.return_value.first.return_value = row
+
+        with (
+            patch.object(main, "new_session", return_value=session),
+            patch.object(main, "_play_queue_item_internal", AsyncMock(return_value=True)) as play_item,
+            patch.object(main.voice, "send_notice", AsyncMock()) as notice,
+        ):
+            await main._handle_chat_command("Bob", "play")
+
+        session.close.assert_called_once_with()
+        play_item.assert_awaited_once_with(42, requested_by="Bob")
+        self.assertIn("已播放队列第一首: 队首歌曲 - 歌手", notice.await_args.args[0])
+
+    async def test_random_and_order_commands_switch_shuffle_mode(self) -> None:
+        with (
+            patch.object(main, "_set_shuffle_enabled", AsyncMock(return_value={"ok": True})) as shuffle,
+            patch.object(main.voice, "get_status", AsyncMock(return_value=SimpleNamespace(state="STATE_PLAYING"))),
+            patch.object(main.voice, "send_notice", AsyncMock()) as notice,
+        ):
+            await main._handle_chat_command("Carol", "随机播放")
+            await main._handle_chat_command("Carol", "顺序播放")
+
+        self.assertEqual([True, False], [call.args[0] for call in shuffle.await_args_list])
+        self.assertIn("已切换为随机播放", notice.await_args_list[0].args[0])
+        self.assertIn("已切换为顺序播放", notice.await_args_list[1].args[0])
+
+    async def test_clear_command_clears_queue_and_playback_state(self) -> None:
+        count_result = unittest.mock.Mock()
+        count_result.scalar.return_value = 3
+        session = unittest.mock.Mock()
+        session.execute.side_effect = [count_result, unittest.mock.Mock()]
+
+        with (
+            patch.object(main, "new_session", return_value=session),
+            patch.object(main, "_shuffle_queue", [1, 2, 3]),
+            patch.object(main, "_current_shuffle_index", 1),
+            patch.object(main, "_invalidate_play_requests", AsyncMock()) as invalidate,
+            patch.object(main, "_set_now_playing_queue_item", AsyncMock()) as clear_now_playing,
+            patch.object(main, "_schedule_ts_description_update"),
+            patch.object(main.voice, "stop", AsyncMock()) as stop,
+            patch.object(main.voice, "send_notice", AsyncMock()) as notice,
+        ):
+            await main._handle_chat_command("Dave", "清空")
+
+            self.assertEqual([], main._shuffle_queue)
+            self.assertEqual(-1, main._current_shuffle_index)
+
+        session.commit.assert_called_once_with()
+        session.close.assert_called_once_with()
+        invalidate.assert_awaited_once_with()
+        clear_now_playing.assert_awaited_once_with(None)
+        stop.assert_awaited_once_with()
+        self.assertIn("已清空播放队列（3 首）", notice.await_args.args[0])
+
+    def test_playlist_results_are_isolated_by_unique_id_and_expire(self) -> None:
+        alice_key = main._ts_playlist_result_key(invoker_unique_id="alice-uid", invoker_name="SameName")
+        bob_key = main._ts_playlist_result_key(invoker_unique_id="bob-uid", invoker_name="SameName")
+        playlists = [{"id": "123", "name": "测试", "creator": "", "track_count": "1"}]
+
+        with patch.object(main.time, "monotonic", return_value=100.0):
+            main._remember_ts_playlist_results(alice_key, playlists)
+
+        with patch.object(main.time, "monotonic", return_value=101.0):
+            self.assertEqual(playlists, main._get_ts_playlist_results(alice_key))
+            self.assertEqual([], main._get_ts_playlist_results(bob_key))
+
+        with patch.object(main.time, "monotonic", return_value=100.0 + main._TS_PLAYLIST_RESULTS_TTL_S):
+            self.assertEqual([], main._get_ts_playlist_results(alice_key))
+
+    def test_netease_search_metadata_accepts_artists_field(self) -> None:
+        raw = {
+            "result": {
+                "songs": [
+                    {
+                        "id": 123,
+                        "name": "歌曲",
+                        "ar": [],
+                        "artists": [{"name": "歌手一"}, {"name": "歌手二"}],
+                    }
+                ]
+            }
+        }
+
+        self.assertEqual(("123", "歌曲", "歌手一, 歌手二"), main._extract_song_meta_from_search_first(raw))
+
+
+class PlaybackCompletionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeat_one_replays_finished_item_without_deleting_it(self) -> None:
+        with (
+            patch.object(main, "_repeat_mode", "one"),
+            patch.object(main, "_take_now_playing_if_match", AsyncMock(return_value=7)),
+            patch.object(main, "_play_queue_item_internal", AsyncMock(return_value=True)) as replay,
+            patch.object(main, "_delete_queue_item", AsyncMock()) as delete_item,
+            patch.object(main, "_auto_play_next_from_queue", AsyncMock()) as play_next,
+        ):
+            await main._handle_playback_finished("source")
+
+        replay.assert_awaited_once_with(7, requested_by="auto")
+        delete_item.assert_not_awaited()
+        play_next.assert_not_awaited()
+
+    async def test_normal_completion_deletes_item_and_plays_next(self) -> None:
+        with (
+            patch.object(main, "_repeat_mode", "none"),
+            patch.object(main, "_take_now_playing_if_match", AsyncMock(return_value=8)),
+            patch.object(main, "_play_queue_item_internal", AsyncMock()) as replay,
+            patch.object(main, "_delete_queue_item", AsyncMock()) as delete_item,
+            patch.object(main, "_auto_play_next_from_queue", AsyncMock()) as play_next,
+        ):
+            await main._handle_playback_finished("source")
+
+        replay.assert_not_awaited()
+        delete_item.assert_awaited_once_with(8)
+        play_next.assert_awaited_once_with()
 
 
 if __name__ == "__main__":

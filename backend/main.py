@@ -7,6 +7,7 @@ from html import unescape
 import hmac
 import math
 import os
+import random
 import re
 import time
 import uuid
@@ -179,6 +180,8 @@ _shuffle_queue: list[int] = []
 _current_shuffle_index: int = -1
 
 _recent_ts_chats: deque[dict] = deque(maxlen=100)
+_TS_PLAYLIST_RESULTS_TTL_S = 300.0
+_ts_playlist_results: dict[str, tuple[float, list[dict[str, str]]]] = {}
 
 _main_loop: asyncio.AbstractEventLoop | None = None
 _ts_desc_task: asyncio.Task[None] | None = None
@@ -606,6 +609,8 @@ async def _hydrate_bilibili_track_metadata(
 
 
 async def _play_queue_item_internal(item_id: int, *, requested_by: str) -> bool:
+    global _current_shuffle_index
+
     session = new_session()
     play_request_generation: int | None = None
     try:
@@ -687,6 +692,9 @@ async def _play_queue_item_internal(item_id: int, *, requested_by: str) -> bool:
         if not await _is_play_request_current(play_request_generation):
             return True
 
+        if _shuffle_enabled and item_id in _shuffle_queue:
+            _current_shuffle_index = _shuffle_queue.index(item_id)
+
         await _set_now_playing_queue_item(
             int(item.id),
             playback_source_url,
@@ -741,11 +749,37 @@ async def _delete_queue_item(item_id: int) -> None:
                 
                 # Adjust current shuffle index if necessary
                 if removed_index <= _current_shuffle_index:
-                    _current_shuffle_index = max(0, _current_shuffle_index - 1)
+                    # The next item shifts into the removed item's slot. A
+                    # current index of -1 makes auto-play select that slot.
+                    _current_shuffle_index = max(-1, _current_shuffle_index - 1)
     finally:
         session.close()
 
     _schedule_ts_description_update()
+
+
+async def _clear_queue_internal(session: Session) -> dict:
+    global _shuffle_queue, _current_shuffle_index
+
+    removed_count = int(session.execute(select(func.count(QueueItem.id))).scalar() or 0)
+    session.execute(delete(QueueItem))
+    session.commit()
+
+    _shuffle_queue = []
+    _current_shuffle_index = -1
+    await _invalidate_play_requests()
+    await _set_now_playing_queue_item(None)
+
+    playback_stopped = False
+    try:
+        await voice.stop()
+        playback_stopped = True
+    except Exception:
+        pass
+
+    _schedule_ts_description_update()
+    return {"ok": True, "removed_count": removed_count, "playback_stopped": playback_stopped}
+
 
 # Alias for backward compatibility
 _remove_queue_item_internal = _delete_queue_item
@@ -756,7 +790,31 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
     
     session = new_session()
     try:
-        if _shuffle_enabled and _shuffle_queue:
+        if _shuffle_enabled:
+            # Queue items can be added after shuffle mode was enabled. Keep the
+            # shuffled order in sync while preserving the existing random order.
+            queued_ids = [
+                int(row.id)
+                for row in session.execute(select(QueueItem).order_by(QueueItem.id.asc())).scalars().all()
+            ]
+            queued_id_set = set(queued_ids)
+            current_shuffle_id = (
+                _shuffle_queue[_current_shuffle_index]
+                if 0 <= _current_shuffle_index < len(_shuffle_queue)
+                else None
+            )
+            _shuffle_queue[:] = [item_id for item_id in _shuffle_queue if item_id in queued_id_set]
+            if current_shuffle_id is not None and current_shuffle_id in _shuffle_queue:
+                _current_shuffle_index = _shuffle_queue.index(current_shuffle_id)
+            elif current_shuffle_id is not None:
+                _current_shuffle_index = -1
+            missing_ids = [item_id for item_id in queued_ids if item_id not in _shuffle_queue]
+            if missing_ids:
+                random.shuffle(missing_ids)
+                _shuffle_queue.extend(missing_ids)
+            if not _shuffle_queue:
+                return
+
             # Play next shuffled track
             next_index = _current_shuffle_index + 1
             
@@ -2501,27 +2559,18 @@ class ShuffleRequest(BaseModel):
     enabled: bool
 
 
-@app.post("/voice/shuffle")
-async def voice_shuffle(req: ShuffleRequest) -> dict:
+async def _set_shuffle_enabled(enabled: bool) -> dict:
     global _shuffle_enabled, _shuffle_queue, _current_shuffle_index
-    
-    _shuffle_enabled = req.enabled
-    
+
+    _shuffle_enabled = bool(enabled)
+
     if _shuffle_enabled:
-        # Generate shuffled queue from current queue
         session = new_session()
         try:
             queue_items = session.execute(select(QueueItem).order_by(QueueItem.id.asc())).scalars().all()
-            queue_ids = [item.id for item in queue_items]
-            
-            # Shuffle the queue IDs using Fisher-Yates algorithm
-            import random
-            _shuffle_queue = queue_ids.copy()
-            for i in range(len(_shuffle_queue) - 1, 0, -1):
-                j = random.randint(0, i)
-                _shuffle_queue[i], _shuffle_queue[j] = _shuffle_queue[j], _shuffle_queue[i]
-            
-            # Find current track position in shuffled queue
+            _shuffle_queue = [int(item.id) for item in queue_items]
+            random.shuffle(_shuffle_queue)
+
             if _current_queue_item_id:
                 try:
                     _current_shuffle_index = _shuffle_queue.index(_current_queue_item_id)
@@ -2534,9 +2583,14 @@ async def voice_shuffle(req: ShuffleRequest) -> dict:
     else:
         _shuffle_queue = []
         _current_shuffle_index = -1
-    
+
     _schedule_ts_description_update()
     return {"ok": True, "enabled": _shuffle_enabled}
+
+
+@app.post("/voice/shuffle")
+async def voice_shuffle(req: ShuffleRequest) -> dict:
+    return await _set_shuffle_enabled(req.enabled)
 
 
 class RepeatRequest(BaseModel):
@@ -3015,8 +3069,12 @@ def _format_help() -> str:
         "状态|now - show now playing\n"
         "搜索|search <keywords> - search songs\n"
         "增加|add <song_id|keywords> - add to queue\n"
-        "播放|play <song_id|keywords> - play now\n"
+        "播放|play [song_id|keywords] - play now; no argument plays the first queue item\n"
         "队列|queue - show queue\n"
+        "歌单|playlist <keywords> - search Netease playlists\n"
+        "选择|select <number> - add a playlist from the last playlist search\n"
+        "清空|clear - clear the current queue\n"
+        "顺序播放|order / 随机播放|random - switch queue playback mode\n"
         "暂停|pause / 恢复|resume / 停止|stop / 跳过|skip\n"
         "音量|vol <0-200> - set volume\n"
         "音效|fx - show audio fx\n"
@@ -3040,7 +3098,7 @@ def _extract_song_meta_from_search_first(raw: dict) -> tuple[str, str, str] | No
     if not sid:
         return None
     title = str(s0.get("name") or "")
-    artist = ", ".join([str(a.get("name") or "") for a in (s0.get("ar") or []) if isinstance(a, dict)])
+    artist = _extract_netease_artist_names(s0)
     return sid, title, artist
 
 
@@ -3050,8 +3108,118 @@ def _extract_song_meta_from_detail(detail: dict, song_id: str) -> tuple[str, str
         return None
     s0 = songs[0] or {}
     title = str(s0.get("name") or song_id)
-    artist = ", ".join([str(a.get("name") or "") for a in (s0.get("ar") or []) if isinstance(a, dict)])
+    artist = _extract_netease_artist_names(s0)
     return title, artist
+
+
+def _extract_playlist_search_items(raw: dict) -> list[dict[str, str]]:
+    playlists = (((raw or {}).get("result") or {}).get("playlists") or [])
+    if not isinstance(playlists, list):
+        return []
+
+    items: list[dict[str, str]] = []
+    for playlist in playlists:
+        if not isinstance(playlist, dict):
+            continue
+        playlist_id = str(playlist.get("id") or "").strip()
+        if not playlist_id:
+            continue
+        creator = playlist.get("creator") or {}
+        creator_name = (
+            str(creator.get("nickname") or "").strip()
+            if isinstance(creator, dict)
+            else str(creator).strip()
+        ) or str(playlist.get("creatorName") or "").strip()
+        track_count = str(playlist.get("trackCount") or playlist.get("track_count") or "").strip()
+        items.append(
+            {
+                "id": playlist_id,
+                "name": str(playlist.get("name") or playlist_id).strip(),
+                "creator": creator_name,
+                "track_count": track_count,
+            }
+        )
+    return items
+
+
+def _extract_playlist_tracks(detail: dict) -> tuple[str, list[dict]]:
+    playlist = (detail or {}).get("playlist") or {}
+    if not isinstance(playlist, dict):
+        return "", []
+    name = str(playlist.get("name") or "").strip()
+    tracks = playlist.get("tracks") or []
+    if not isinstance(tracks, list):
+        return name, []
+    return name, [track for track in tracks if isinstance(track, dict)]
+
+
+async def _load_netease_playlist_tracks(
+    detail: dict,
+    *,
+    cookie: str | None = None,
+) -> tuple[str, list[dict]]:
+    """Return playlist tracks, filling in trackIds when the API omits tracks."""
+    name, tracks = _extract_playlist_tracks(detail)
+    playlist = (detail or {}).get("playlist") or {}
+    if not isinstance(playlist, dict):
+        return name, tracks
+    raw_ids = playlist.get("trackIds") or playlist.get("track_ids") or []
+    if not isinstance(raw_ids, list):
+        return name, tracks
+    ids = [
+        str((entry or {}).get("id") or "").strip()
+        for entry in raw_ids
+        if isinstance(entry, dict) and str((entry or {}).get("id") or "").strip()
+    ]
+    if not ids or len(ids) <= len(tracks):
+        return name, tracks
+
+    chunks = [ids[index : index + 200] for index in range(0, len(ids), 200)]
+    results = await asyncio.gather(
+        *[netease.song_detail(song_id=",".join(chunk), cookie=cookie) for chunk in chunks],
+        return_exceptions=True,
+    )
+    resolved: list[dict] = []
+    for result in results:
+        if isinstance(result, Exception):
+            continue
+        if not isinstance(result, dict):
+            continue
+        songs = (result or {}).get("songs") or []
+        if isinstance(songs, list):
+            resolved.extend(song for song in songs if isinstance(song, dict))
+    return name, resolved or tracks
+
+
+def _ts_playlist_result_key(*, invoker_unique_id: str, invoker_name: str) -> str:
+    unique_id = (invoker_unique_id or "").strip()
+    if unique_id:
+        return f"uid:{unique_id}"
+    name = (invoker_name or "").strip()
+    return f"name:{name or '__anonymous__'}"
+
+
+def _remember_ts_playlist_results(key: str, playlists: list[dict[str, str]]) -> None:
+    now = time.monotonic()
+    expired_keys = [
+        stored_key
+        for stored_key, (expires_at, _items) in _ts_playlist_results.items()
+        if expires_at <= now
+    ]
+    for expired_key in expired_keys:
+        _ts_playlist_results.pop(expired_key, None)
+    _ts_playlist_results[key] = (now + _TS_PLAYLIST_RESULTS_TTL_S, playlists)
+
+
+def _get_ts_playlist_results(key: str) -> list[dict[str, str]]:
+    stored = _ts_playlist_results.get(key)
+    if stored is None:
+        return []
+    expires_at, playlists = stored
+    if expires_at <= time.monotonic():
+        _ts_playlist_results.pop(key, None)
+        return []
+    return playlists
 
 
 async def _enqueue_netease_song(
@@ -3319,7 +3487,13 @@ async def _enqueue_bilibili_song(
         session.close()
 
 
-async def _handle_chat_command(invoker_name: str, message: str, *, target_mode: int = 2) -> None:
+async def _handle_chat_command(
+    invoker_name: str,
+    message: str,
+    *,
+    target_mode: int = 2,
+    invoker_unique_id: str = "",
+) -> None:
     raw = (message or "")
     msg = raw.strip()
     if not msg:
@@ -3357,6 +3531,28 @@ async def _handle_chat_command(invoker_name: str, message: str, *, target_mode: 
         "搜": "search",
         "搜索": "search",
         "查": "search",
+        "playlist": "playlist",
+        "playlists": "playlist",
+        "歌单list": "playlist",
+        "歌单": "playlist",
+        "歌单列表": "playlist",
+        "select": "select",
+        "选择": "select",
+        "选歌单": "select",
+        "歌单选择": "select",
+        "clear": "clear",
+        "清空": "clear",
+        "清空队列": "clear",
+        "random": "random",
+        "shuffle": "random",
+        "随机": "random",
+        "随机播放": "random",
+        "随机播放列表里的曲目": "random",
+        "order": "order",
+        "ordered": "order",
+        "顺序": "order",
+        "顺序播放": "order",
+        "顺序播放列表里的曲目": "order",
         "add": "add",
         "a": "add",
         "加": "add",
@@ -3405,6 +3601,10 @@ async def _handle_chat_command(invoker_name: str, message: str, *, target_mode: 
     if not cmd:
         return
     arg = tail.strip()
+    invoker_key = _ts_playlist_result_key(
+        invoker_unique_id=invoker_unique_id,
+        invoker_name=invoker_name,
+    )
 
     async def reply(text: str) -> None:
         t = (text or "").strip()
@@ -3446,6 +3646,132 @@ async def _handle_chat_command(invoker_name: str, message: str, *, target_mode: 
                 return
             finally:
                 session.close()
+
+        if cmd == "clear":
+            session = new_session()
+            try:
+                result = await _clear_queue_internal(session)
+            finally:
+                session.close()
+            await reply(f"已清空播放队列（{result['removed_count']} 首）")
+            return
+
+        if cmd in ("random", "order"):
+            requested_mode = arg.strip().lower()
+            if cmd == "random" and requested_mode in ("off", "0", "false", "关", "关闭"):
+                enabled = False
+            elif cmd == "order" and requested_mode in ("random", "on", "1", "true", "开"):
+                enabled = True
+            else:
+                enabled = cmd == "random"
+            await _set_shuffle_enabled(enabled)
+            mode = "随机播放" if enabled else "顺序播放"
+            if enabled:
+                try:
+                    st = await voice.get_status()
+                    cur = str(getattr(st, "state", "") or "").strip().upper()
+                    if cur == "STATE_IDLE":
+                        await _auto_play_next_from_queue()
+                except Exception:
+                    pass
+            await reply(f"已切换为{mode}")
+            return
+
+        if cmd == "playlist":
+            if not arg:
+                await reply("用法: playlist <歌单关键词>")
+                return
+            raw = await netease.search(keywords=arg, limit=5, type_=1000)
+            playlists = _extract_playlist_search_items(raw)
+            if not playlists:
+                await reply("没有找到网易云歌单")
+                return
+            _remember_ts_playlist_results(invoker_key, playlists)
+            lines: list[str] = []
+            for index, playlist in enumerate(playlists, start=1):
+                detail = f"{playlist['name']}"
+                creator = playlist.get("creator") or ""
+                track_count = playlist.get("track_count") or ""
+                suffix = ""
+                if creator:
+                    suffix += f" - {creator}"
+                if track_count:
+                    suffix += f" ({track_count}首)"
+                lines.append(f"{index}. {detail}{suffix} [id={playlist['id']}]")
+            await reply("网易云歌单搜索结果（使用 select <编号> 加入队列）：\n" + "\n".join(lines))
+            return
+
+        if cmd == "select":
+            if not arg:
+                await reply("用法: select <歌单编号>")
+                return
+            playlists = _get_ts_playlist_results(invoker_key)
+            selection_token = arg.split()[0].strip()
+            selected_playlist: dict[str, str] | None = None
+            try:
+                selection = int(selection_token)
+            except ValueError:
+                selection = -1
+            if 1 <= selection <= len(playlists):
+                selected_playlist = playlists[selection - 1]
+            else:
+                selected_playlist = next(
+                    (playlist for playlist in playlists if playlist.get("id") == selection_token),
+                    None,
+                )
+            if selected_playlist is None:
+                await reply("歌单编号无效，请先使用 playlist 搜索")
+                return
+            playlist_id = selected_playlist["id"]
+
+            cookie = _get_admin_cookie_or_none()
+            detail = await netease.playlist_detail(playlist_id=playlist_id, cookie=cookie)
+            playlist_name, tracks = await _load_netease_playlist_tracks(detail, cookie=cookie)
+            if not tracks:
+                await reply("歌单为空，或网易云未返回可用歌曲")
+                return
+
+            added = 0
+            failed = 0
+            for track in tracks:
+                normalized = _normalize_netease_song(track)
+                if normalized is None:
+                    failed += 1
+                    continue
+                try:
+                    await _enqueue_netease_song(
+                        song_id=str(normalized["song_id"]),
+                        title=str(normalized["title"]),
+                        artist=str(normalized["artist"]),
+                        play_now=False,
+                        requested_by=invoker_name,
+                        album=str(normalized.get("album") or ""),
+                        duration_ms=normalized.get("duration_ms"),
+                        artwork_url=str(normalized.get("artwork_url") or ""),
+                        quality_level="auto",
+                    )
+                    added += 1
+                except Exception:
+                    failed += 1
+
+            auto_started = False
+            if added:
+                try:
+                    st = await voice.get_status()
+                    cur = str(getattr(st, "state", "") or "").strip().upper()
+                    if cur == "STATE_IDLE":
+                        await _auto_play_next_from_queue()
+                        auto_started = True
+                except Exception:
+                    pass
+            label = playlist_name or selected_playlist.get("name") or playlist_id
+            status = f"已从歌单《{label}》加入 {added} 首歌曲"
+            if failed:
+                status += f"，{failed} 首失败"
+            if auto_started:
+                status += "，已开始播放"
+            await reply(status)
+            return
 
         if cmd == "pause":
             await _mark_playback_paused()
@@ -3608,9 +3934,36 @@ async def _handle_chat_command(invoker_name: str, message: str, *, target_mode: 
             for i, s in enumerate(songs[:5], start=1):
                 sid = str((s or {}).get("id") or "")
                 title = str((s or {}).get("name") or "")
-                artist = ", ".join([str(a.get("name") or "") for a in ((s or {}).get("ar") or []) if isinstance(a, dict)])
+                artist = _extract_netease_artist_names(s or {}) if isinstance(s, dict) else ""
                 lines.append(f"{i}. {sid} {title} - {artist}".strip())
             await reply("搜索结果(可直接用 add/play + 歌曲ID):\n" + "\n".join(lines))
+            return
+
+        if cmd == "play" and not arg:
+            session = new_session()
+            first_item_id: int | None = None
+            first_title = ""
+            first_artist = ""
+            try:
+                first_item = session.execute(
+                    select(QueueItem).order_by(QueueItem.id.asc()).limit(1)
+                ).scalars().first()
+                if first_item is not None:
+                    first_item_id = int(first_item.id)
+                    first_title = str(first_item.title or "").strip()
+                    first_artist = str(first_item.artist or "").strip()
+            finally:
+                session.close()
+
+            if first_item_id is None:
+                await reply("播放队列为空")
+                return
+            ok = await _play_queue_item_internal(first_item_id, requested_by=invoker_name or "ts")
+            if not ok:
+                await reply("播放队列第一首歌曲失败，歌曲可能已被移除")
+                return
+            label = f"{first_title} - {first_artist}".strip(" -")
+            await reply(f"已播放队列第一首: {label}")
             return
 
         if cmd in ("add", "play"):
@@ -3697,6 +4050,17 @@ async def _handle_chat_command(invoker_name: str, message: str, *, target_mode: 
         await reply(f"error: {e}")
 
 
+async def _handle_playback_finished(source_url: str) -> None:
+    item_id = await _take_now_playing_if_match(source_url=source_url)
+    if item_id is None:
+        return
+    if _repeat_mode == "one":
+        await _play_queue_item_internal(item_id, requested_by="auto")
+        return
+    await _delete_queue_item(item_id)
+    await _auto_play_next_from_queue()
+
+
 async def _chat_command_worker() -> None:
     while True:
         try:
@@ -3721,6 +4085,7 @@ async def _chat_command_worker() -> None:
                             str(getattr(chat, "invoker_name", "")),
                             str(getattr(chat, "message", "")),
                             target_mode=int(getattr(chat, "target_mode", 2) or 2),
+                            invoker_unique_id=str(getattr(chat, "invoker_unique_id", "") or ""),
                         )
                         continue
 
@@ -3730,10 +4095,7 @@ async def _chat_command_worker() -> None:
                         src = str(getattr(pb, "source_url", "") or "")
                         # PlaybackEvent.Type: STARTED=1, FINISHED=2, ERROR=3
                         if ty == 2:
-                            item_id = await _take_now_playing_if_match(source_url=src)
-                            if item_id is not None:
-                                await _delete_queue_item(item_id)
-                                await _auto_play_next_from_queue()
+                            await _handle_playback_finished(src)
                         if ty == 3:
                             item_id = await _take_now_playing_if_match(source_url=src)
                             if item_id is not None:
@@ -4078,27 +4440,7 @@ def get_queue(session: Session = Depends(get_session)) -> list[dict]:
 
 @app.delete("/queue")
 async def clear_queue(session: Session = Depends(get_session)) -> dict:
-    global _shuffle_queue, _current_shuffle_index
-
-    removed_count = int(session.execute(select(func.count(QueueItem.id))).scalar() or 0)
-    session.execute(delete(QueueItem))
-    session.commit()
-
-    _shuffle_queue = []
-    _current_shuffle_index = -1
-
-    await _set_now_playing_queue_item(None)
-    await _invalidate_play_requests()
-
-    playback_stopped = False
-    try:
-        await voice.stop()
-        playback_stopped = True
-    except Exception:
-        playback_stopped = False
-
-    _schedule_ts_description_update()
-    return {"ok": True, "removed_count": removed_count, "playback_stopped": playback_stopped}
+    return await _clear_queue_internal(session)
 
 
 @app.post("/queue")
@@ -4116,11 +4458,19 @@ def add_queue(req: AddQueueRequest, session: Session = Depends(get_session)) -> 
 
 @app.delete("/queue/{item_id}")
 def delete_queue_item(item_id: int, session: Session = Depends(get_session)) -> dict:
+    global _shuffle_queue, _current_shuffle_index
+
     item = session.get(QueueItem, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="not found")
     session.delete(item)
     session.commit()
+
+    if _shuffle_enabled and item_id in _shuffle_queue:
+        removed_index = _shuffle_queue.index(item_id)
+        _shuffle_queue.remove(item_id)
+        if removed_index <= _current_shuffle_index:
+            _current_shuffle_index = max(-1, _current_shuffle_index - 1)
 
     _schedule_ts_description_update()
     return {"ok": True}
