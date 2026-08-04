@@ -23,7 +23,7 @@ cd tsbot
 复制环境配置文件并修改：
 ```bash
 cp tsbot.env.example tsbot.env
-# 编辑 tsbot.env 文件，配置你的 TeamSpeak 服务器、音乐源和 cookie 信息
+# 编辑 tsbot.env，至少设置用于加密敏感配置的 TSBOT_COOKIE_KEY
 ```
 
 ### 3. 安装依赖
@@ -128,7 +128,7 @@ Windows 下建议先启动后端和前端；如需真正播放音频，再补齐
 #### 1. 复制环境配置
 ```powershell
 Copy-Item tsbot.env.example tsbot.env
-# 编辑 tsbot.env，填写 TeamSpeak、cookie、音乐源等配置
+# 编辑 tsbot.env，至少设置用于加密敏感配置的 TSBOT_COOKIE_KEY
 ```
 
 #### 2. 安装后端依赖
@@ -205,7 +205,7 @@ npm.cmd --prefix web run dev
 cp tsbot.env.example tsbot.env
 ```
 
-> 如果 `NeteaseCloudMusicApi` 跑在宿主机，请将 `TSBOT_NETEASE_API_BASE` 配置为 `http://host.docker.internal:3000/`。
+> 如果 `NeteaseCloudMusicApi` 跑在宿主机，请在容器启动后通过 Web 系统配置将地址设为 `http://host.docker.internal:3000/`。
 
 ### 2. 构建并启动
 
@@ -256,31 +256,18 @@ docker compose -f docker-compose.prebuilt.yml up -d
 - 现在看到 `backend` / `web` / `voice-service` 三个镜像仓库是正常的，因为当前发布策略就是按三个服务分别构建。
 - GitHub **Releases** 页面里的 `tar.gz` 与 `SHA256SUMS.txt` 是软件包归档，不是 Docker 镜像。
 
-## 环境变量配置
+## 启动配置与 Web 系统配置
 
 编辑 `tsbot.env` 文件：
 
 ```env
-# TeamSpeak 服务器配置（变量名 `TSBOT_TS3_*` 为兼容历史保留，也用于 TS6 主客户端连接）
-TSBOT_TS3_HOST=your_teamspeak_server_ip
-TSBOT_TS3_PORT=9987
-TSBOT_TS3_NICKNAME=tsbot
-TSBOT_TS3_CHANNEL_ID=2
-TSBOT_TS3_IDENTITY_FILE=./logs/identity.json
-# TSBOT_TS3_CHANNEL_PATH=/Music
-# TSBOT_TS3_SERVER_PASSWORD=
-# TSBOT_TS3_CHANNEL_PASSWORD=
-# TSBOT_TS3_ALLOW_DIRECT_CLIENTUPDATE_DESCRIPTION=1
-# TSBOT_TS3_CLIENT_DESCRIPTION_TITLE=Yumi TSBot
-# TSBOT_TS3_CLIENT_DESCRIPTION_INTRO=TeamSpeak 音乐机器人\n支持网易云 / QQ 音乐
-# TSBOT_TS3_AVATAR_FILE=./assets/avatar.png
-# TSBOT_TS3_AVATAR_DIR=./assets/avatars
-
 # 后端服务配置
 TSBOT_HOST=127.0.0.1
 TSBOT_PORT=8009
 TSBOT_VOICE_GRPC_ADDR=127.0.0.1:50051
 TSBOT_COOKIE_KEY=change_me_to_a_random_string
+TSBOT_VOICE_CONFIG_FILE=./logs/voice-service.json
+TSBOT_INITIAL_PASSWORD_FILE=./logs/initial-admin-password.txt
 
 # 前端生产服务配置（run-web.sh / nohup-start.sh 使用）
 TSBOT_WEB_HOST=127.0.0.1
@@ -295,39 +282,35 @@ VITE_DEV_PORT=5173
 # 前端 API Base（推荐默认 /api，由 dev / preview / Docker 反向代理到 backend）
 VITE_API_BASE=/api
 # VITE_WEB_PUBLIC_URL=https://music.example.com
-# VITE_WEB_APP_NAME=Yumi TSBot
-# VITE_WEB_APP_ICON=/favicon.ico
-
-# 日志配置
-TSBOT_LOG_LEVEL=INFO
-VITE_LOG_LEVEL=INFO
-
 # 数据库配置 (可选)
 DATABASE_URL=sqlite:///./tsbot.db
-
-# 网易云音乐配置（仅使用网易云能力时需要）
-TSBOT_NETEASE_API_BASE=http://127.0.0.1:3000/
 ```
 
 说明：
 
-- `voice-service` 主客户端连接已支持 TS6；配置项仍沿用 `TSBOT_TS3_*` 命名。
+- 首次启动后，从后端日志或 `logs/initial-admin-password.txt` 取得 `admin` 的初始密码。
+- 第一次登录会强制更换密码，成功后初始密码文件自动删除。
+- TeamSpeak / TS6、网易云 API、缓存、日志、外部 Token、界面名称都在 Web 的“系统配置”中维护。
+- 界面图标和 TeamSpeak 机器人头像在 Web 设置页直接上传，固定保存在数据库目录旁的 `uploads/` 中；不再填写服务器图片路径。
+- “保存配置”只将表单持久化到数据库；“应用配置”才会更新运行服务。应用 TeamSpeak 或 Voice 改动后，voice-service 会优雅断开并自动用新配置重启，Web 在新进程返回后提示“已重启成功”。
+- “TeamSpeak 配置”包含连接、频道、身份和客户端简介；“Voice 服务”包含后端到 Voice 的连接与 Voice 运行参数。
+- 旧部署的 `TSBOT_TS3_*` 等变量会在数据库缺少对应值时导入一次，迁移后可从环境文件删除。
 - QQ 音乐能力由后端内建提供，不需要额外部署独立的 QQ 音乐 API 服务。
-- QQ 音乐与网易云的管理员 cookie 都通过 Web 控制台或 admin API 写入数据库，并使用 `TSBOT_COOKIE_KEY` 加密存储。
-- 可选的 `TSBOT_TS3_SERVERQUERY_*` 仍是旧式 ServerQuery fallback，不是 TS6 的 HTTP(S) Query。
+- 网易云、QQ 音乐和 B 站授权统一位于“系统配置 → 音乐会员登录”；管理员 Cookie 写入数据库并使用 `TSBOT_COOKIE_KEY` 加密存储。
+- 忘记密码可在服务器本地执行 `.venv/bin/python -m backend.admin_cli reset-password`。
 
 ## 音乐源支持
 
 ### 网易云音乐
 
 - 依赖外部 `NeteaseCloudMusicApi` 服务。
-- 需要将该服务地址配置到 `TSBOT_NETEASE_API_BASE`。
+- 需要在 Web 系统配置中填写该服务地址。
 
 ### QQ 音乐
 
 - 搜索、歌单、歌词等能力由后端直接提供。
 - 播放链接、用户歌单等登录态能力建议在 Web 控制台中扫码登录 QQ 音乐。
-- 如启用了 `TSBOT_ADMIN_TOKEN`，调用 `/admin/qqmusic/*` 接口时需带 `x-admin-token` 请求头。
+- 管理员平台授权接口使用 Web 登录会话保护，不再使用长期 `x-admin-token`。
 
 ## 访问应用
 

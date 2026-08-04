@@ -18,7 +18,7 @@ TSBot 是一个基于 TeamSpeak 的音乐机器人；`voice-service` 主客户�
 - **网易云音乐搜索/歌单/喜欢/歌词**（通过外部 `NeteaseCloudMusicApi` 服务）
 - **QQ 音乐搜索/歌单/歌词/播放链接**（后端内建适配，登录态能力可通过 Web 控制台配置）
 - **B 站视频搜索与音频播放**（支持搜索视频、展示简介/点赞/收藏/投币，并在播放时缓存音频；有字幕的视频可在歌词页显示字幕时间轴，支持通过管理员登录态补抓 AI 字幕）
-- **Web 控制台**（Vue3 前端，用于搜索/队列/最近播放/本地收藏/歌词/设置）
+- **Web 控制台**（Vue3 前端，用于搜索/队列/最近播放/本地收藏/歌词，以及受管理员密码保护的完整运行配置）
 - **外部集成 API**（`/external/*` 提供统一搜索、入队、状态读取、历史读取与历史重播）
 ![预览图](docs/1.png)
 ![预览图](docs/2.png)
@@ -88,9 +88,9 @@ TSBot 的目标是把边界重新划清：
 ## TeamSpeak / TS6 支持
 
 - `voice-service` 的主客户端连接路径已经适配 TeamSpeak 服务器登录、进频道、收发文字消息和音频播放，当前可用于 TS3/TS6 服务器。
-- 为兼容旧配置，环境变量名仍保持为 `TSBOT_TS3_*`，但它们同样用于 TS6 的主客户端连接。
+- TeamSpeak / TS6 连接信息在 Web 控制台的“系统配置”中维护；升级时仍会一次性导入旧的 `TSBOT_TS3_*` 环境变量。
 - 代码中仍保留一条可选的 legacy `ServerQuery` fallback，仅用于旧式 `client_description` 更新；它不是 TS6 的 HTTP(S) Query 接口。
-- 如果你希望 bot 直接以“模拟客户端”的方式更新自己的简介，可在环境变量中开启 `TSBOT_TS3_ALLOW_DIRECT_CLIENTUPDATE_DESCRIPTION=1`。
+- 如果你希望 bot 直接以“模拟客户端”的方式更新自己的简介，可在系统配置中开启“允许直接更新客户端简介”。
 
 ## 网易云音乐支持（可选，依赖 `NeteaseCloudMusicApi`）
 
@@ -99,7 +99,7 @@ TSBot 的目标是把边界重新划清：
 - **NPM**: https://www.npmjs.com/package/NeteaseCloudMusicApi
 - **文档**: https://neteasecloudmusicapi.js.org/#/
 
-部署完成后，把服务地址写到环境变量 `TSBOT_NETEASE_API_BASE`（例如 `http://127.0.0.1:3000/`）。
+部署完成后，在 Web 控制台的“音乐接口配置”中填写服务地址（例如 `http://127.0.0.1:3000/`）。
 
 常见部署方式（任选其一，具体参数以官方文档为准）：
 
@@ -130,8 +130,8 @@ B 站能力由后端直接适配，不需要额外部署独立 API 服务。
 - 实际播放时，后端会先把音频下载到本地缓存，再交给 `voice-service` 播放。
 - 可通过 Web 控制台或 `/admin/bilibili/*` 接口保存管理员 B 站 Cookie，用于登录态 API 和 Playwright 抓取 AI 字幕。
 - 当公开视频接口拿不到字幕轨时，后端会在存在管理员 B 站 Cookie 的前提下，尝试使用登录态接口和 Playwright 页面环境补抓 AI 字幕。
-- 可通过 `TSBOT_BILIBILI_MAX_DURATION_MINUTES` 限制允许点播的最长视频时长，避免超长视频拖垮播放链路。
-- 音频缓存默认保留 72 小时且上限为 2 GiB，可通过 `TSBOT_BILIBILI_AUDIO_CACHE_TTL_HOURS`、`TSBOT_BILIBILI_AUDIO_CACHE_MAX_MB` 和 `TSBOT_BILIBILI_AUDIO_PARTIAL_TTL_MINUTES` 调整。
+- 可在 Web 控制台限制允许点播的最长视频时长，避免超长视频拖垮播放链路。
+- 音频缓存默认保留 72 小时且上限为 2 GiB，可在“音乐接口配置”中调整。
 
 ## 快速开始（推荐）
 
@@ -153,9 +153,10 @@ B 站能力由后端直接适配，不需要额外部署独立 API 服务。
 3. 在项目根目录执行 chmod +x setup.sh run-*.sh nohup-*.sh。
 4. 执行 ./setup.sh 安装后端、前端和 voice-service 依赖并完成构建。
 5. 如果 tsbot.env 不存在，请从 tsbot.env.example 复制；如果已存在，不要覆盖。
-6. 提醒我填写 tsbot.env 中的 TSBOT_TS3_HOST、TSBOT_TS3_PORT、TSBOT_TS3_CHANNEL_ID、TSBOT_COOKIE_KEY，以及需要的音乐源配置。
-7. 我确认配置完成后，执行 ./nohup-start.sh 启动服务，再执行 ./nohup-status.sh 检查状态。
-8. 最后告诉我 Web 控制台地址、后端 OpenAPI 地址和日志文件位置。
+6. 提醒我只填写 tsbot.env 中的 TSBOT_COOKIE_KEY，并执行 ./nohup-start.sh 启动服务。
+7. 从后端日志或 logs/initial-admin-password.txt 读取一次性管理员密码，登录 Web 控制台并修改密码。
+8. 在 Web 系统配置中填写 TeamSpeak、音乐源等运行配置，上传界面图标和机器人头像，点击“应用配置”并确认 Voice 重启成功。
+9. 最后告诉我 Web 控制台地址、后端 OpenAPI 地址和日志文件位置。
 ```
 
 如果你已经手动克隆到了本仓库目录，也可以把第 1 步改成“使用当前目录，不要重新 clone”。Codex 执行到需要填写 `tsbot.env` 时应暂停并让你补齐配置；不要把真实 Cookie、token 或服务器密码直接发给 Codex，建议在本机编辑器里修改 `tsbot.env`。
@@ -168,35 +169,23 @@ B 站能力由后端直接适配，不需要额外部署独立 API 服务。
 cp tsbot.env.example tsbot.env
 ```
 
-你至少需要设置：
+新部署只需在环境文件中确认数据库、监听地址，并设置 `TSBOT_COOKIE_KEY`。TeamSpeak、网易云 API、缓存限制、日志、外部 API Token 和平台登录态都在 Web 控制台配置。
 
-- `TSBOT_TS3_HOST` / `TSBOT_TS3_PORT` / `TSBOT_TS3_CHANNEL_ID`（TeamSpeak 连接信息；变量名沿用历史 `TSBOT_TS3_*`）
-- `TSBOT_COOKIE_KEY`（用于加密存储管理员 Cookie；务必改成自己的随机字符串）
+首次启动时，后端会为 `admin` 生成随机初始密码，并同时打印到后端日志、写入 `logs/initial-admin-password.txt`。第一次登录必须修改密码；改密成功后该文件会自动删除。忘记密码时可在服务器本地执行：
 
-按音乐源补充设置：
+```bash
+.venv/bin/python -m backend.admin_cli reset-password
+```
 
-- 使用网易云：设置 `TSBOT_NETEASE_API_BASE` 为你部署的 `NeteaseCloudMusicApi` 地址，例如 `http://127.0.0.1:3000/`
-- 使用 QQ 音乐登录态能力：通过 Web 控制台或 `/admin/qqmusic/*` 接口写入管理员 QQ 音乐 Cookie
-- 使用 B 站登录态 AI 字幕抓取：通过 Web 控制台或 `/admin/bilibili/*` 接口写入管理员 B 站 Cookie
+设置页右上角的“保存配置”只把当前表单持久化到数据库，适合先分组检查配置；“应用配置”会合并所有已保存但尚未应用的改动，并更新运行中的服务。TeamSpeak 或 Voice 配置发生变化时，voice-service 会正常断开并自动使用新配置重启；Web 会等待新进程返回对应的配置版本后显示“已重启成功”，不需要给后端 Docker Socket 或 systemd 管理权限。
 
-可选：
+“TeamSpeak 配置”同时包含连接、频道、身份和客户端简介；“Voice 服务”同时包含后端到 Voice 的连接与 Voice 运行参数，避免同一功能分散在重复菜单中。
 
-- `TSBOT_TS3_SERVER_PASSWORD` / `TSBOT_TS3_CHANNEL_PASSWORD` / `TSBOT_TS3_CHANNEL_PATH`
-- `TSBOT_TS3_IDENTITY` / `TSBOT_TS3_IDENTITY_FILE`
-- `TSBOT_TS3_ALLOW_DIRECT_CLIENTUPDATE_DESCRIPTION`：允许 bot 直接通过客户端自身更新 `client_description`
-- `TSBOT_TS3_CLIENT_DESCRIPTION_TITLE` / `TSBOT_TS3_CLIENT_DESCRIPTION_INTRO`：配置频道内显示的简介标题和介绍正文（支持 `\n`）
-- `TSBOT_TS3_AVATAR_FILE` / `TSBOT_TS3_AVATAR_DIR`：配置 bot 客户端头像
-- `TSBOT_ADMIN_TOKEN`：开启后端 admin 接口保护（请求头 `x-admin-token`）
-- `TSBOT_API_TOKEN` / `TSBOT_API_TOKENS`：为后端非 admin 接口开启共享 token 保护（支持 `Authorization: Bearer <token>` 或 `x-api-token`）
-- `TSBOT_WEB_HOST` / `TSBOT_WEB_PORT`：前端生产预览服务监听地址/端口（`run-web.sh` / `nohup-start.sh` 使用）
-- `TSBOT_WEB_API_PROXY_TARGET`：前端 dev / preview 代理到后端的目标地址（默认根据 `TSBOT_HOST` / `TSBOT_PORT` 推导）
-- `TSBOT_WEB_ALLOWED_HOSTS`：当你通过域名访问 Vite dev / preview 时允许的 host 白名单（逗号分隔）
-- `VITE_DEV_HOST` / `VITE_DEV_PORT`：前端本地 dev server 监听地址/端口
-- `VITE_API_BASE`：前端请求后端的 Base URL（推荐默认 `/api`，由 dev / preview / Docker 反向代理转发）
-- `VITE_WEB_PUBLIC_URL`：网页公网 URL（用于页面 canonical / og:url，也会补充到 allowedHosts）
-- `VITE_WEB_APP_NAME`：网页显示名称（浏览器标题、侧边栏品牌）
-- `VITE_WEB_APP_ICON`：网页 icon / favicon URL
-- `VITE_API_TOKEN`：如果你启用了 `TSBOT_API_TOKEN` 且仍需要 Web 控制台访问后端，请把同一个 token 传给前端
+界面图标和 TeamSpeak 机器人头像不再接受服务器文件路径。管理员可直接在 Web 设置页上传、更换或清除图片；文件固定保存在 SQLite 数据库所在目录的 `uploads/` 子目录中（Docker Compose 默认是 `data/uploads/`）。头像更换或清除后也会触发 voice-service 自动重启。
+
+网易云用户登录、网易云后台播放授权、QQ 音乐后台授权和 B 站后台授权统一位于“系统配置 → 音乐会员登录”。旧的 `/cookie` 地址会自动跳转到该设置分类。
+
+环境文件中仍可按需配置 `TSBOT_WEB_HOST` / `TSBOT_WEB_PORT`、Web 反向代理目标、允许访问的域名和开发服务器端口。这些参数决定进程如何启动，因此在系统配置中只读展示；其余运行配置都由数据库和 Web 控制台托管。
 
 ### 2) 安装依赖
 
@@ -296,11 +285,7 @@ npm --prefix web run dev
 cp tsbot.env.example tsbot.env
 ```
 
-至少确认以下配置：
-
-- `TSBOT_TS3_HOST` / `TSBOT_TS3_PORT` / `TSBOT_TS3_CHANNEL_ID`
-- `TSBOT_COOKIE_KEY`
-- `TSBOT_NETEASE_API_BASE`（如果你在宿主机跑 NeteaseCloudMusicApi，可设为 `http://host.docker.internal:3000/`）
+至少确认 `TSBOT_COOKIE_KEY`。如果 NeteaseCloudMusicApi 运行在宿主机，容器启动后可在 Web 控制台将网易云 API 地址设为 `http://host.docker.internal:3000/`。
 
 ### 2) 构建并启动
 
@@ -375,19 +360,15 @@ docker compose -f docker-compose.prebuilt.yml up -d
 
 ## 外部 API Token
 
-如果你希望把 backend 暴露给外部脚本、面板或机器人调用，建议配置：
+如果你希望把 backend 暴露给外部脚本、面板或机器人调用，可在 Web 控制台的“外部 API”中配置一个或多个 Token。
 
 - `TSBOT_API_TOKEN="<长随机字符串>"`：单个共享 token
 - 或 `TSBOT_API_TOKENS="token_a,token_b"`：多个 token（逗号或空白分隔）
 
-启用后，**非 `/admin/*` 的后端接口** 都需要携带 token，支持两种写法：
+启用后，稳定的 `/external/*` 集成接口需要携带 token，支持两种写法：
 
 - `Authorization: Bearer <token>`
 - `x-api-token: <token>`
-
-如果你同时还要继续使用 Web 控制台，需要在前端启动/构建时再配置：
-
-- `VITE_API_TOKEN="<与后端相同的 token>"`
 
 文档详见: `docs/API.md`
 
@@ -399,7 +380,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
 - `/external/history`：读取最近播放
 - `/external/history/{history_id}/replay`：按历史记录重新加入队列或立即播放
 
-## 管理员登录态（网易云 / QQ 音乐）
+## 平台授权（网易云 / QQ 音乐 / B 站）
 
 ### 网易云 Cookie
 
@@ -408,14 +389,14 @@ docker compose -f docker-compose.prebuilt.yml up -d
 - 获取更稳定的歌曲 URL（避免部分接口匿名受限）
 - 访问歌单/喜欢列表等需要登录态的能力
 
-设置方式（需要 admin token 时请带上请求头 `x-admin-token: <TSBOT_ADMIN_TOKEN>`）：
+设置方式（需要先通过 `/auth/login` 建立管理员会话，Web 控制台会自动处理）：
 
 - `POST /admin/cookie`：写入 cookie
 - `GET /admin/status`：查看是否已设置
 - `GET /admin/account`：验证 cookie 是否有效
 - `GET /admin/qr/key` / `GET /admin/qr/create` / `GET /admin/qr/check`：管理员二维码登录
 
-前端也提供了设置入口（详见 `web/README.md`）。
+Web 入口位于“系统配置 → 音乐会员登录”。
 
 ### QQ 音乐 Cookie
 
@@ -424,13 +405,17 @@ docker compose -f docker-compose.prebuilt.yml up -d
 - 获取更稳定的 QQ 音乐播放链接
 - 访问需要登录态的用户歌单、账号信息等能力
 
-设置方式（需要 admin token 时请带上请求头 `x-admin-token: <TSBOT_ADMIN_TOKEN>`）：
+设置方式（需要先建立管理员会话）：
 
 - `GET /admin/qqmusic/status`：查看是否已设置
 - `POST /admin/qqmusic/cookie`：手动写入 cookie
 - `POST /admin/qqmusic/qr/confirm`：确认 Web 扫码登录后写入 cookie
 
 Web 控制台内置了 QQ 音乐扫码登录入口。
+
+### B 站 Cookie
+
+B 站后台授权支持扫码登录或手动 Cookie，用于登录态接口和 AI 字幕 Playwright 抓取兜底。Cookie 同样加密存储在数据库中，Web 入口位于“系统配置 → 音乐会员登录”。
 
 ## 日志
 
@@ -450,7 +435,7 @@ Web 控制台内置了 QQ 音乐扫码登录入口。
 ├── web/             # Vue3 前端
 ├── voice-service/   # Rust 语音服务（gRPC + TeamSpeak）
 ├── proto/           # gRPC proto 定义
-├── data/            # 运行数据/配置（如 config.json）
+├── data/            # 数据库与网页上传图片（uploads/）
 ├── logs/            # 运行日志（启动脚本会自动创建）
 ├── HOWTOSTART.md
 ├── LOGGING.md
