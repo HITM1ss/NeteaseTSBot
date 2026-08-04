@@ -36,6 +36,9 @@ voice-service/build/
 voice-service/target/
 web/dist/
 backend/data/
+data/uploads/
+.playwright-cli/
+output/playwright/
 
 # Rust
 voice-service/target/
