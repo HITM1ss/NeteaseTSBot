@@ -74,6 +74,7 @@ message StatusResponse {
   string now_playing_title = 2;
   string now_playing_source_url = 3;
   int32 volume_percent = 4;
+  string config_revision = 5;
 }
 
 message SetAudioFxRequest {

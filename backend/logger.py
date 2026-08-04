@@ -66,6 +66,22 @@ def setup_logger(
     return logger
 
 
+def reconfigure_logger(level: str, log_file: str) -> None:
+    lvl = (level or "INFO").strip().upper().replace("WARN", "WARNING")
+    logger.setLevel(getattr(logging, lvl, logging.INFO))
+    formatter = TSBotFormatter()
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            logger.removeHandler(handler)
+            handler.close()
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+
 # 全局 logger 实例
 logger = setup_logger(
     level=getattr(settings, 'log_level', 'INFO'),

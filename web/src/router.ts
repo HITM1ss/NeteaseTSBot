@@ -6,8 +6,11 @@ import PlaylistsView from './views/PlaylistsView.vue'
 import PlaylistDetailView from './views/PlaylistDetailView.vue'
 import QueueView from './views/QueueView.vue'
 import HistoryView from './views/HistoryView.vue'
-import CookieView from './views/CookieView.vue'
 import LyricsView from './views/LyricsView.vue'
+import SettingsView from './views/SettingsView.vue'
+import LoginView from './views/LoginView.vue'
+import ChangePasswordView from './views/ChangePasswordView.vue'
+import { refreshAuth } from './auth'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -20,11 +23,24 @@ export const router = createRouter({
     { path: '/playlist/:id', component: PlaylistDetailView },
     { path: '/queue', component: QueueView },
     { path: '/history', component: HistoryView },
-    { path: '/cookie', component: CookieView },
+    { path: '/login', name: 'login', component: LoginView, meta: { authPage: true } },
+    { path: '/change-password', name: 'change-password', component: ChangePasswordView, meta: { authPage: true, requiresAuth: true } },
+    { path: '/settings', component: SettingsView, meta: { requiresAuth: true } },
+    { path: '/cookie', redirect: { path: '/settings', query: { group: 'authorization' } } },
     { path: '/lyrics', component: LyricsView },
   ],
 })
 
-router.beforeEach((_to: RouteLocationNormalized) => {
+router.beforeEach(async (to: RouteLocationNormalized) => {
+  const status = await refreshAuth(true)
+  if (status.authenticated && status.must_change_password && to.name !== 'change-password') {
+    return { name: 'change-password' }
+  }
+  if (to.meta.requiresAuth && !status.authenticated) {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
+  if (to.name === 'login' && status.authenticated) {
+    return status.must_change_password ? { name: 'change-password' } : '/settings'
+  }
   return true
 })

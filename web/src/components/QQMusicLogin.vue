@@ -32,8 +32,6 @@ const cookieInput = ref('')
 const loginMethod = ref<'qr' | 'cookie'>('qr')
 const statusCheckInterval = ref<number | null>(null)
 
-const adminToken = ref('')
-
 // Check current login status
 async function checkLoginStatus() {
   try {
@@ -115,10 +113,7 @@ function startStatusPolling() {
           if (result.auth_url) {
             console.log('Auth URL:', result.auth_url)
             try {
-              const token = adminToken.value.trim()
-              const headers: Record<string, string> = {}
-              if (token) headers['x-admin-token'] = token
-              await apiPost('/qqmusic/login/qr/confirm', { auth_url: result.auth_url }, headers)
+              await apiPost('/admin/qqmusic/qr/confirm', { auth_url: result.auth_url })
               // Re-check status after confirm
               const st = await apiGet<any>('/qqmusic/login/status')
               if (st.logged_in) {
@@ -245,16 +240,6 @@ onUnmounted(() => {
         >
           <X :size="20" class="text-gray-500" />
         </button>
-      </div>
-
-      <div class="px-6 pt-4">
-        <label class="block text-sm font-medium text-gray-700 mb-2">管理员 Token</label>
-        <input
-          v-model="adminToken"
-          type="password"
-          placeholder="用于保存QQ cookie到服务器（不会存到浏览器）"
-          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-        />
       </div>
 
       <!-- Content -->

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import DateTime, Integer, String, Text
+import secrets
+from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -17,6 +18,37 @@ class Secret(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
+
+
+class AdminCredential(Base):
+    __tablename__ = "admin_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    username: Mapped[str] = mapped_column(String(64), unique=True, default="admin")
+    password_hash: Mapped[str] = mapped_column(Text)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
+    password_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now, onupdate=beijing_now)
+
+
+class AdminSession(Base):
+    __tablename__ = "admin_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=lambda: secrets.randbits(62) + 1)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    csrf_token: Mapped[str] = mapped_column(String(64))
+    password_version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now, onupdate=beijing_now)
 
 
 class QueueItem(Base):

@@ -1,3 +1,6 @@
+import { logger } from './utils/logger'
+import { reactive } from 'vue'
+
 const rawEnv = (import.meta as any).env || {}
 
 function readString(name: string, fallback: string = ''): string {
@@ -7,10 +10,32 @@ function readString(name: string, fallback: string = ''): string {
   return trimmed || fallback
 }
 
-export const appConfig = {
+export const appConfig = reactive({
   name: readString('VITE_WEB_APP_NAME', 'TSBot Music'),
   iconHref: readString('VITE_WEB_APP_ICON', ''),
   publicUrl: readString('VITE_WEB_PUBLIC_URL', ''),
+  logLevel: readString('VITE_LOG_LEVEL', 'INFO'),
+})
+
+export async function loadAppBranding(): Promise<void> {
+  const rawBase = rawEnv?.VITE_API_BASE || '/api'
+  const base = String(rawBase).replace(/\/+$/, '')
+  try {
+    const response = await fetch(`${base}/config/public`, { credentials: 'include' })
+    if (response.ok) {
+      const config = await response.json()
+      if (typeof config?.app_name === 'string' && config.app_name) appConfig.name = config.app_name
+      if (typeof config?.app_icon === 'string') {
+        appConfig.iconHref = config.app_icon.startsWith('/assets/')
+          ? `${base}${config.app_icon}`
+          : config.app_icon
+      }
+      if (typeof config?.log_level === 'string' && config.log_level) appConfig.logLevel = config.log_level
+    }
+  } catch {
+  }
+  logger.setLevelName(appConfig.logLevel)
+  applyAppBranding()
 }
 
 function ensureMeta(selector: string, create: () => HTMLElement): HTMLElement {
@@ -61,6 +86,8 @@ export function applyAppBranding(): void {
       return link
     })
     shortcutIcon.setAttribute('href', appConfig.iconHref)
+  } else {
+    document.head.querySelectorAll('link[rel="icon"], link[rel="shortcut icon"]').forEach((node) => node.remove())
   }
 
   if (appConfig.publicUrl) {

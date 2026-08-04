@@ -1,7 +1,7 @@
 <template>
-  <div class="h-full flex flex-col bg-gray-50">
+  <div :class="embedded ? 'theme-authorization-settings' : 'h-full flex flex-col bg-gray-50'">
     <!-- Header -->
-    <div class="bg-white/80 backdrop-blur-md border-b border-gray-200 px-6 py-4 sticky top-0 z-20 shadow-sm transition-all duration-300">
+    <div v-if="!embedded" class="bg-white/80 backdrop-blur-md border-b border-gray-200 px-6 py-4 sticky top-0 z-20 shadow-sm transition-all duration-300">
       <div class="flex items-center gap-4">
         <h1 class="text-2xl font-bold text-gray-900 tracking-tight flex items-center gap-2">
           <Settings :size="28" class="text-blue-600" />
@@ -14,8 +14,8 @@
     </div>
 
     <!-- Content -->
-    <div class="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6 pb-24 scrollbar-thin">
-      <div class="max-w-4xl mx-auto space-y-6 md:space-y-8 fade-in">
+    <div :class="embedded ? '' : 'flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6 pb-24 scrollbar-thin'">
+      <div :class="embedded ? 'space-y-4' : 'max-w-4xl mx-auto space-y-6 md:space-y-8 fade-in'">
         <!-- Status Banner -->
         <div v-if="status" class="status-info animate-fade-in shadow-sm rounded-xl border-blue-100 bg-blue-50/50">
           <div class="flex-shrink-0">
@@ -25,8 +25,8 @@
         </div>
 
         <!-- User Login Section -->
-        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden relative">
-          <div class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
+        <section class="theme-settings-panel bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
+          <div v-if="!embedded" class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
             <User :size="200" class="text-black" />
           </div>
           
@@ -95,8 +95,8 @@
         </section>
 
         <!-- Admin Login Section -->
-        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden relative">
-          <div class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
+        <section class="theme-settings-panel bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
+          <div v-if="!embedded" class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
             <Shield :size="200" class="text-black" />
           </div>
 
@@ -165,12 +165,6 @@
                     placeholder="输入 Cookie 字符串 (MUSIC_U=...)" 
                     class="input-field flex-1 font-mono text-sm"
                   />
-                  <input 
-                    v-model="adminToken" 
-                    type="password" 
-                    placeholder="Admin Token (可选)" 
-                    class="input-field md:w-48 font-mono text-sm"
-                  />
                   <button @click="setAdminCookie" class="btn-secondary whitespace-nowrap font-medium">
                     保存配置
                   </button>
@@ -185,8 +179,8 @@
         </section>
 
         <!-- QQ Music Admin Section -->
-        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden relative">
-          <div class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
+        <section class="theme-settings-panel bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
+          <div v-if="!embedded" class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
             <Shield :size="200" class="text-black" />
           </div>
 
@@ -255,12 +249,6 @@
                     placeholder="输入 Cookie 字符串 (uin=...; p_skey=... 等)"
                     class="input-field flex-1 font-mono text-sm"
                   />
-                  <input
-                    v-model="adminToken"
-                    type="password"
-                    placeholder="Admin Token (可选)"
-                    class="input-field md:w-48 font-mono text-sm"
-                  />
                   <button @click="setQQAdminCookie" class="btn-secondary whitespace-nowrap font-medium">
                     保存配置
                   </button>
@@ -275,8 +263,8 @@
         </section>
 
         <!-- Bilibili Admin Section -->
-        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden relative">
-          <div class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
+        <section class="theme-settings-panel bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
+          <div v-if="!embedded" class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
             <Shield :size="200" class="text-black" />
           </div>
 
@@ -361,12 +349,6 @@
                     placeholder="输入 B站 Cookie 字符串 (SESSDATA=...; bili_jct=... 等)"
                     class="input-field flex-1 font-mono text-sm"
                   />
-                  <input
-                    v-model="adminToken"
-                    type="password"
-                    placeholder="Admin Token (可选)"
-                    class="input-field md:w-48 font-mono text-sm"
-                  />
                   <button @click="setBilibiliAdminCookie" class="btn-secondary whitespace-nowrap font-medium">
                     保存配置
                   </button>
@@ -401,6 +383,10 @@ import {
   AlertCircle 
 } from 'lucide-vue-next'
 
+withDefaults(defineProps<{ embedded?: boolean }>(), {
+  embedded: false,
+})
+
 const USER_COOKIE_KEY = 'tsbot_user_netease_cookie'
 
 const userCookie = ref(localStorage.getItem(USER_COOKIE_KEY) || '')
@@ -426,7 +412,6 @@ const bilibiliPlaywrightDependencyInstalled = ref(false)
 const adminManualCookie = ref('')
 const qqAdminManualCookie = ref('')
 const bilibiliAdminManualCookie = ref('')
-const adminToken = ref('')
 
 const status = ref('')
 
@@ -436,9 +421,7 @@ let qqAdminTimer: number | null = null
 let bilibiliAdminTimer: number | null = null
 
 function getAdminHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {}
-  if (adminToken.value.trim()) headers['x-admin-token'] = adminToken.value.trim()
-  return headers
+  return {}
 }
 
 async function load() {

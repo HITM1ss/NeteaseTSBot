@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     api_tokens: str = ""
 
     admin_token: str = ""
+    initial_admin_password: str = ""
+    initial_password_file: str = "./logs/initial-admin-password.txt"
+    voice_config_file: str = "./logs/voice-service.json"
+    web_app_name: str = "Yumi TSBot"
+    web_app_icon: str = ""
+    web_log_level: str = "INFO"
+    voice_description_title: str = "Yumi TSBot"
+    voice_description_intro: str = "TeamSpeak 音乐机器人\\n支持网易云 / QQ 音乐 / B站"
     bilibili_max_duration_minutes: int = 180
     bilibili_audio_cache_ttl_hours: int = 72
     bilibili_audio_cache_max_mb: int = 2048

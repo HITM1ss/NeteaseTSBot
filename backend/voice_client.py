@@ -18,6 +18,7 @@ class VoiceStatus:
     now_playing_title: str
     now_playing_source_url: str
     volume_percent: int
+    config_revision: str = ""
 
 
 @dataclass
@@ -125,6 +126,7 @@ class VoiceClient:
             now_playing_title=resp.now_playing_title,
             now_playing_source_url=resp.now_playing_source_url,
             volume_percent=resp.volume_percent,
+            config_revision=str(getattr(resp, "config_revision", "") or ""),
         )
 
     async def set_audio_fx(

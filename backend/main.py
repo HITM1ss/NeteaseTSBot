@@ -14,9 +14,9 @@ import uuid
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -33,11 +33,32 @@ from .bilibili_auth import (
 )
 from .crypto import decrypt_text, encrypt_text
 from .db import create_db_and_tables, get_database_url, get_session, get_sqlite_db_path, new_session
-from .models import HistoryItem, QueueItem, Secret
+from .models import AdminCredential, HistoryItem, QueueItem, Secret
+from .auth import (
+    clear_session_cookie,
+    create_session,
+    get_admin_session,
+    initialize_admin,
+    invalidate_sessions,
+    remove_initial_password_file,
+    require_admin,
+    require_csrf,
+    set_session_cookie,
+    verify_password,
+    hash_password,
+)
+from .runtime_config import (
+    initialize_runtime_settings,
+    settings_payload,
+    update_settings,
+    voice_config_revision,
+    write_voice_config,
+)
+from .managed_assets import ASSET_BY_KEY, asset_path, asset_payload, delete_asset, detect_image_type, save_asset, MAX_IMAGE_BYTES
 from .netease import NeteaseClient
 from .netease_cookie import extract_netease_auth_cookie, has_netease_auth_cookie
 from .qqmusic import QQMusicClient
-from .voice_client import VoiceClient
+from .voice_client import VoiceClient, VoiceStatus
 from .config import settings
 from .logger import logger
 
@@ -124,13 +145,7 @@ def _path_requires_api_token(path: str) -> bool:
         return False
 
     normalized = _normalize_request_path(path)
-    if normalized in {"/", "/docs", "/redoc", "/openapi.json"}:
-        return False
-    if normalized.startswith("/docs/") or normalized.startswith("/redoc/"):
-        return False
-    if normalized == "/admin" or normalized.startswith("/admin/"):
-        return False
-    return True
+    return normalized == "/external" or normalized.startswith("/external/")
 
 
 def _check_api_token(request: Request) -> str | None:
@@ -173,6 +188,7 @@ _current_duration_ms: int = 0
 _current_artist: str | None = None
 _current_album: str | None = None
 _current_artwork_url: str | None = None
+_voice_unavailable_last_log: float = 0.0
 
 _shuffle_enabled: bool = False
 _repeat_mode: str = "none"  # "none", "all", "one"
@@ -272,11 +288,60 @@ class ExternalQueueRequest(BaseModel):
     play_now: bool = False
 
 
+class AdminLoginRequest(BaseModel):
+    username: str = "admin"
+    password: str
+
+
+class AdminPasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class SettingsUpdateRequest(BaseModel):
+    values: dict[str, object | None]
+    apply: bool = True
+
+
+_login_attempts: dict[str, tuple[int, float]] = {}
+
+
+def _login_rate_limit_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate_limit(request: Request) -> None:
+    key = _login_rate_limit_key(request)
+    failures, blocked_until = _login_attempts.get(key, (0, 0.0))
+    if blocked_until > time.monotonic():
+        retry = max(1, int(blocked_until - time.monotonic()))
+        raise HTTPException(status_code=429, detail=f"登录尝试过多，请 {retry} 秒后重试")
+    if blocked_until:
+        _login_attempts[key] = (failures, 0.0)
+
+
+def _record_login_failure(request: Request) -> None:
+    key = _login_rate_limit_key(request)
+    failures, _ = _login_attempts.get(key, (0, 0.0))
+    failures += 1
+    delay = min(60, 2 ** max(0, failures - 3)) if failures >= 3 else 0
+    _login_attempts[key] = (failures, time.monotonic() + delay if delay else 0.0)
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     global _chat_task
     global _main_loop
     create_db_and_tables()
+
+    bootstrap_session = new_session()
+    try:
+        initialize_admin(bootstrap_session)
+        initialize_runtime_settings(bootstrap_session)
+    finally:
+        bootstrap_session.close()
+
+    netease._base = settings.netease_api_base.rstrip("/")
 
     _main_loop = asyncio.get_running_loop()
     session = new_session()
@@ -348,8 +413,8 @@ async def _build_ts_description(*, queue_preview: int = 5) -> str:
         paused = _play_started_at is not None and _paused_at is not None
 
     lines: list[str] = []
-    title_lines = _split_env_multiline(os.getenv("TSBOT_TS3_CLIENT_DESCRIPTION_TITLE"))
-    intro_lines = _split_env_multiline(os.getenv("TSBOT_TS3_CLIENT_DESCRIPTION_INTRO"))
+    title_lines = _split_env_multiline(settings.voice_description_title)
+    intro_lines = _split_env_multiline(settings.voice_description_intro)
     if title_lines:
         lines.extend(title_lines)
         lines.append("")
@@ -2240,7 +2305,23 @@ async def _resolve_bilibili_playback_payload(
 
 @app.get("/voice/status")
 async def voice_status() -> dict:
-    st = await voice.get_status()
+    global _voice_unavailable_last_log
+    voice_connected = True
+    try:
+        st = await voice.get_status()
+    except Exception as exc:
+        voice_connected = False
+        now = time.monotonic()
+        if now - _voice_unavailable_last_log >= 30:
+            logger.warning("voice-service 暂时不可用（%s），状态接口将返回离线状态", type(exc).__name__)
+            _voice_unavailable_last_log = now
+        st = VoiceStatus(
+            state="STATE_ERROR",
+            now_playing_title="",
+            now_playing_source_url="",
+            volume_percent=100,
+            config_revision="",
+        )
 
     state_map = {
         "STATE_IDLE": "idle",
@@ -2305,6 +2386,8 @@ async def voice_status() -> dict:
         "volume_percent": st.volume_percent,
         "is_shuffled": _shuffle_enabled,
         "repeat_mode": _repeat_mode,
+        "voice_connected": voice_connected,
+        "voice_config_revision": st.config_revision,
     }
 
 
@@ -3052,14 +3135,13 @@ def _get_admin_bilibili_cookie(session: Session) -> str:
 
 
 def _require_admin_token(request: Request) -> None:
-    token = (settings.admin_token or "").strip()
-    if not token:
-        return
-    provided = (request.headers.get("x-admin-token") or "").strip()
-    if not provided:
-        raise HTTPException(status_code=403, detail="missing admin token")
-    if provided != token:
-        raise HTTPException(status_code=403, detail="invalid admin token")
+    session = new_session()
+    try:
+        _, admin_session = require_admin(request, session)
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            require_csrf(request, admin_session)
+    finally:
+        session.close()
 
 
 def _format_help() -> str:
@@ -4062,9 +4144,11 @@ async def _handle_playback_finished(source_url: str) -> None:
 
 
 async def _chat_command_worker() -> None:
+    retry_delay = 1.0
     while True:
         try:
             async for ev in voice.subscribe_events(include_chat=True, include_playback=True, include_log=False):
+                retry_delay = 1.0
                 try:
                     if not hasattr(ev, "WhichOneof"):
                         continue
@@ -4114,9 +4198,14 @@ async def _chat_command_worker() -> None:
                     continue
         except asyncio.CancelledError:
             return
-        except Exception:
-            logger.exception("chat worker: subscribe loop crashed; retrying")
-            await asyncio.sleep(2)
+        except Exception as exc:
+            logger.warning(
+                "voice 事件订阅暂时中断（%s），%.0f 秒后重连",
+                type(exc).__name__,
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(30.0, retry_delay * 2)
 
 
 def _set_secret(session: Session, key: str, plaintext: str) -> None:
@@ -4130,8 +4219,224 @@ def _set_secret(session: Session, key: str, plaintext: str) -> None:
     session.commit()
 
 
+@app.get("/config/public")
+def public_config() -> dict:
+    icon = ASSET_BY_KEY["web-app-icon"]
+    return {
+        "app_name": settings.web_app_name,
+        "app_icon": icon.public_path if asset_path(icon).is_file() else "",
+        "log_level": settings.web_log_level,
+    }
+
+
+@app.get("/assets/{asset_key}")
+def managed_asset_file(asset_key: str) -> FileResponse:
+    asset = ASSET_BY_KEY.get(asset_key)
+    if asset is None or not asset.public_path:
+        raise HTTPException(status_code=404, detail="未知图片资源")
+    path = asset_path(asset)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="尚未上传图片")
+    media_type = detect_image_type(path.read_bytes()) or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/auth/status")
+def auth_status(request: Request, session: Session = Depends(get_session)) -> dict:
+    credential = session.get(AdminCredential, 1)
+    payload = {
+        "initialized": credential is not None,
+        "authenticated": False,
+        "must_change_password": False,
+        "username": "",
+        "csrf_token": "",
+    }
+    if credential is None:
+        return payload
+    try:
+        credential, admin_session = get_admin_session(request, session)
+    except HTTPException:
+        return payload
+    payload.update({
+        "authenticated": True,
+        "must_change_password": credential.must_change_password,
+        "username": credential.username,
+        "csrf_token": admin_session.csrf_token,
+    })
+    return payload
+
+
+@app.post("/auth/login")
+def auth_login(
+    req: AdminLoginRequest,
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_session),
+) -> dict:
+    _check_login_rate_limit(request)
+    credential = session.get(AdminCredential, 1)
+    username_ok = credential is not None and hmac.compare_digest(req.username.strip(), credential.username)
+    password_ok = credential is not None and verify_password(req.password, credential.password_hash)
+    if not username_ok or not password_ok or credential is None:
+        _record_login_failure(request)
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    _login_attempts.pop(_login_rate_limit_key(request), None)
+    raw_token, admin_session = create_session(session, credential)
+    set_session_cookie(response, raw_token, request)
+    return {
+        "authenticated": True,
+        "must_change_password": credential.must_change_password,
+        "username": credential.username,
+        "csrf_token": admin_session.csrf_token,
+    }
+
+
+@app.post("/auth/change-password")
+def auth_change_password(
+    req: AdminPasswordChangeRequest,
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_session),
+) -> dict:
+    credential, admin_session = require_admin(request, session, allow_password_change=True)
+    require_csrf(request, admin_session)
+    if not verify_password(req.current_password, credential.password_hash):
+        raise HTTPException(status_code=400, detail="当前密码错误")
+    new_password = req.new_password
+    if len(new_password) < 10:
+        raise HTTPException(status_code=422, detail="新密码至少需要 10 个字符")
+    if hmac.compare_digest(req.current_password, new_password):
+        raise HTTPException(status_code=422, detail="新密码不能与当前密码相同")
+    credential.password_hash = hash_password(new_password)
+    credential.must_change_password = False
+    credential.password_version += 1
+    session.commit()
+    invalidate_sessions(session)
+    raw_token, new_session_row = create_session(session, credential)
+    set_session_cookie(response, raw_token, request)
+    remove_initial_password_file()
+    return {
+        "authenticated": True,
+        "must_change_password": False,
+        "username": credential.username,
+        "csrf_token": new_session_row.csrf_token,
+    }
+
+
+@app.post("/auth/logout")
+def auth_logout(request: Request, response: Response, session: Session = Depends(get_session)) -> dict:
+    _, admin_session = require_admin(request, session, allow_password_change=True)
+    require_csrf(request, admin_session)
+    session.delete(admin_session)
+    session.commit()
+    clear_session_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/admin/settings")
+def admin_settings(request: Request, session: Session = Depends(get_session)) -> dict:
+    require_admin(request, session)
+    return settings_payload(session)
+
+
+@app.put("/admin/settings")
+async def admin_update_settings(
+    req: SettingsUpdateRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict:
+    global BILIBILI_AUDIO_CACHE_TTL_SECONDS, BILIBILI_AUDIO_CACHE_MAX_BYTES
+    global BILIBILI_AUDIO_PARTIAL_TTL_SECONDS
+
+    _, admin_session = require_admin(request, session)
+    require_csrf(request, admin_session)
+    effects = update_settings(session, req.values, apply=req.apply)
+    if req.apply:
+        netease._base = settings.netease_api_base.rstrip("/")
+        BILIBILI_AUDIO_CACHE_TTL_SECONDS = max(0, settings.bilibili_audio_cache_ttl_hours) * 3600
+        BILIBILI_AUDIO_CACHE_MAX_BYTES = max(0, settings.bilibili_audio_cache_max_mb) * 1024 * 1024
+        BILIBILI_AUDIO_PARTIAL_TTL_SECONDS = max(0, settings.bilibili_audio_partial_ttl_minutes) * 60
+        if "backend.voice_grpc_addr" in req.values:
+            await voice.close()
+        if "voice" in effects and any(key.startswith("voice.description_") for key in req.values):
+            _schedule_ts_description_update()
+    return {
+        "ok": True,
+        "voice_restart_requested": req.apply and "voice" in effects,
+        "voice_config_revision": voice_config_revision() if req.apply and "voice" in effects else "",
+        "backend_restart_required": req.apply and "backend" in effects,
+        **settings_payload(session),
+    }
+
+
+async def _read_managed_asset(request: Request) -> bytes:
+    content_length = request.headers.get("content-length", "").strip()
+    if content_length:
+        try:
+            if int(content_length) > MAX_IMAGE_BYTES:
+                raise HTTPException(status_code=413, detail="图片不能超过 5 MiB")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="无效的 Content-Length") from None
+    content = bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="图片不能超过 5 MiB")
+    return bytes(content)
+
+
+@app.put("/admin/assets/{asset_key}")
+async def admin_upload_asset(
+    asset_key: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict:
+    _, admin_session = require_admin(request, session)
+    require_csrf(request, admin_session)
+    asset = ASSET_BY_KEY.get(asset_key)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="未知图片配置")
+    content = await _read_managed_asset(request)
+    try:
+        save_asset(asset, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("无法写入固定图片目录 %s: %s", asset_path(asset).parent, exc)
+        raise HTTPException(status_code=500, detail="无法写入固定图片目录，请检查数据目录权限") from exc
+    revision = write_voice_config(session, force_restart=True) if asset.restart == "voice" else ""
+    return {
+        "ok": True,
+        "voice_restart_requested": asset.restart == "voice",
+        "voice_config_revision": revision,
+        "asset": asset_payload(asset),
+    }
+
+
+@app.delete("/admin/assets/{asset_key}")
+def admin_delete_asset(
+    asset_key: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict:
+    _, admin_session = require_admin(request, session)
+    require_csrf(request, admin_session)
+    asset = ASSET_BY_KEY.get(asset_key)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="未知图片配置")
+    changed = delete_asset(asset)
+    revision = write_voice_config(session, force_restart=True) if changed and asset.restart == "voice" else ""
+    return {
+        "ok": True,
+        "voice_restart_requested": changed and asset.restart == "voice",
+        "voice_config_revision": revision,
+        "asset": asset_payload(asset),
+    }
+
+
 @app.get("/admin/status")
-def admin_status(session: Session = Depends(get_session)) -> dict:
+def admin_status(request: Request, session: Session = Depends(get_session)) -> dict:
+    _require_admin_token(request)
     row = session.get(Secret, "netease_cookie")
     if not row or not row.value:
         return {"admin_cookie_set": False}

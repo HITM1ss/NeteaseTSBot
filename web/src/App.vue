@@ -20,12 +20,13 @@ import {
 } from 'lucide-vue-next'
 
 const sidebarOpen = ref(false)
-const appName = appConfig.name
+const appName = computed(() => appConfig.name)
 const themeMode = ref<'light' | 'dark'>(getInitialTheme())
 const isDarkMode = computed(() => themeMode.value === 'dark')
 
 const route = useRoute()
 const isLyricsRoute = computed(() => route.name === 'lyrics' || route.path.startsWith('/lyrics'))
+const isAuthRoute = computed(() => Boolean(route.meta.authPage))
 
 function toggleSidebar() {
   sidebarOpen.value = !sidebarOpen.value
@@ -38,7 +39,8 @@ function toggleTheme() {
 </script>
 
 <template>
-  <div :class="['app-shell min-h-screen transition-colors duration-300', isLyricsRoute ? 'bg-black h-[100dvh] overflow-hidden' : 'bg-gray-50 pb-24']">
+  <div :class="['app-shell min-h-screen transition-colors duration-300', isLyricsRoute ? 'bg-black h-[100dvh] overflow-hidden' : isAuthRoute ? 'bg-gray-50' : 'bg-gray-50 pb-24']">
+    <RouterView v-if="isAuthRoute" />
     <template v-if="isLyricsRoute">
       <div class="h-full relative z-0">
         <RouterView v-slot="{ Component, route: currentRoute }">
@@ -51,7 +53,7 @@ function toggleTheme() {
       </div>
     </template>
 
-    <template v-else>
+    <template v-else-if="!isAuthRoute">
       <!-- Mobile sidebar backdrop -->
       <div 
         v-if="sidebarOpen" 
@@ -151,7 +153,7 @@ function toggleTheme() {
           <!-- User/Settings Footer -->
           <div class="theme-sidebar-footer p-4 border-t border-gray-100 bg-gray-50/50">
             <RouterLink 
-              to="/cookie" 
+              to="/settings"
               class="nav-item"
               active-class="nav-item-active"
             >
@@ -198,7 +200,7 @@ function toggleTheme() {
               <Sun v-else :size="20" />
             </button>
             <RouterLink
-              to="/cookie"
+              to="/settings"
               class="theme-toolbar-btn p-2 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
               title="设置"
             >
@@ -221,6 +223,6 @@ function toggleTheme() {
     </template>
     
     <!-- Music Player -->
-    <MusicPlayer v-if="!isLyricsRoute" />
+    <MusicPlayer v-if="!isLyricsRoute && !isAuthRoute" />
   </div>
 </template>

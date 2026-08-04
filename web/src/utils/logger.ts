@@ -79,6 +79,10 @@ class TSBotLogger {
     this.level = level;
     localStorage.setItem('tsbot_log_level', LogLevel[level]);
   }
+
+  setLevelName(level: string): void {
+    this.setLevel(this.parseLogLevel(level));
+  }
 }
 
 // 导出全局 logger 实例

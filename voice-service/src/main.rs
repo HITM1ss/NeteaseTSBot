@@ -1,8 +1,8 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +39,7 @@ use tsbot::voice::v1 as voicev1;
 use voicev1::voice_service_server::{VoiceService, VoiceServiceServer};
 
 static DIRECT_DESCRIPTION_UPDATE_WARNED: AtomicBool = AtomicBool::new(false);
+static CONFIG_RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 struct SharedStatus {
@@ -546,6 +547,7 @@ impl VoiceService for VoiceServiceImpl {
             now_playing_title: st.now_playing_title.clone(),
             now_playing_source_url: st.now_playing_source_url.clone(),
             volume_percent: st.volume_percent,
+            config_revision: get_env("TSBOT_VOICE_CONFIG_REVISION", ""),
         }))
     }
 
@@ -744,6 +746,33 @@ fn get_env(key: &str, def: &str) -> String {
         }
         Err(_) => def.to_string(),
     }
+}
+
+fn voice_config_path() -> PathBuf {
+    let configured = env::var("TSBOT_VOICE_CONFIG_FILE")
+        .unwrap_or_else(|_| "./logs/voice-service.json".to_string());
+    resolve_repo_relative(&configured)
+}
+
+fn load_voice_config() -> Vec<u8> {
+    let path = voice_config_path();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            eprintln!("failed to read voice config {}: {e}", path.display());
+            return Vec::new();
+        }
+    };
+    match serde_json::from_slice::<HashMap<String, String>>(&bytes) {
+        Ok(values) => {
+            for (key, value) in values {
+                env::set_var(key, value);
+            }
+        }
+        Err(e) => eprintln!("failed to parse voice config {}: {e}", path.display()),
+    }
+    bytes
 }
 
 fn env_flag(key: &str) -> bool {
@@ -1883,6 +1912,7 @@ async fn playback_loop(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let initial_config = load_voice_config();
     logger::init_logger();
 
     let addr = env::args().nth(1).unwrap_or_else(|| "127.0.0.1:50051".to_string());
@@ -1902,6 +1932,27 @@ async fn main() -> Result<()> {
         info!("Received Ctrl+C, shutting down gracefully...");
         shutdown_token_clone.cancel();
     });
+
+    {
+        let shutdown_token = shutdown_token.clone();
+        let config_path = voice_config_path();
+        tokio::spawn(async move {
+            let baseline = initial_config;
+            loop {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                if shutdown_token.is_cancelled() {
+                    return;
+                }
+                let current = fs::read(&config_path).unwrap_or_default();
+                if current != baseline {
+                    info!(path = %config_path.display(), "voice configuration changed; restarting service");
+                    CONFIG_RESTART_REQUESTED.store(true, Ordering::SeqCst);
+                    shutdown_token.cancel();
+                    return;
+                }
+            }
+        });
+    }
 
     let ts3_task = {
         let events_tx_clone = events_tx.clone();
@@ -2028,5 +2079,20 @@ async fn main() -> Result<()> {
     }
 
     info!("Voice service shutdown complete");
+    if CONFIG_RESTART_REQUESTED.load(Ordering::SeqCst) {
+        let executable = env::current_exe()?;
+        let args: Vec<String> = env::args().skip(1).collect();
+        info!("Starting voice-service again with the updated configuration");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let error = Command::new(executable).args(args).exec();
+            return Err(anyhow!("failed to restart voice-service: {error}"));
+        }
+        #[cfg(not(unix))]
+        {
+            Command::new(executable).args(args).spawn()?;
+        }
+    }
     Ok(())
 }

@@ -87,8 +87,11 @@ class AdminCookieStatusTests(unittest.TestCase):
         session = unittest.mock.Mock()
         session.get.return_value = unittest.mock.Mock(value="encrypted-empty-cookie")
 
-        with patch.object(main, "decrypt_text", return_value=""):
-            result = main.admin_status(session)
+        with (
+            patch.object(main, "_require_admin_token"),
+            patch.object(main, "decrypt_text", return_value=""),
+        ):
+            result = main.admin_status(object(), session)
 
         self.assertFalse(result["admin_cookie_set"])
 
@@ -107,8 +110,11 @@ class AdminCookieStatusTests(unittest.TestCase):
         session.get.return_value = unittest.mock.Mock(value="encrypted-metadata-cookie")
         metadata_cookie = "NMTID=device-id; __csrf=csrf-token"
 
-        with patch.object(main, "decrypt_text", return_value=metadata_cookie):
-            status = main.admin_status(session)
+        with (
+            patch.object(main, "_require_admin_token"),
+            patch.object(main, "decrypt_text", return_value=metadata_cookie),
+        ):
+            status = main.admin_status(object(), session)
             with self.assertRaises(HTTPException) as raised:
                 main._get_admin_cookie(session)
 
@@ -330,6 +336,19 @@ class PlaybackCompletionTests(unittest.IsolatedAsyncioTestCase):
         replay.assert_not_awaited()
         delete_item.assert_awaited_once_with(8)
         play_next.assert_awaited_once_with()
+
+
+class VoiceStatusFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unavailable_voice_service_returns_offline_status(self) -> None:
+        with (
+            patch.object(main.voice, "get_status", AsyncMock(side_effect=RuntimeError("offline"))),
+            patch.object(main, "_current_queue_item_id", None),
+        ):
+            result = await main.voice_status()
+
+        self.assertFalse(result["voice_connected"])
+        self.assertEqual("idle", result["state"])
+        self.assertEqual("", result["now_playing_title"])
 
 
 if __name__ == "__main__":
