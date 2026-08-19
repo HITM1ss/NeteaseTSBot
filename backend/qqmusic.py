@@ -50,9 +50,9 @@ class QQMusicClient:
 
         if uin_val.isdigit():
             self._uin = uin_val
-            print(f"[DEBUG] Extracted UIN from cookie: {self._uin}")
+            print(f"[DEBUG] Extracted QQ Music UIN: {self._uin}")
         else:
-            print(f"[DEBUG] No valid numeric UIN found in cookie: {cookie_str[:100]}...")
+            print("[DEBUG] No valid numeric UIN found in QQ Music cookie")
         
         # 检查 VIP 相关的 cookie 字段
         vip_indicators = ["vip", "musickey", "musicid", "qm_keyst", "qqmusic_key"]
@@ -63,9 +63,10 @@ class QQMusicClient:
                     found_vip_cookies.append(part.strip())
         
         if found_vip_cookies:
-            print(f"[DEBUG] Found VIP-related cookies: {found_vip_cookies}")
+            names = [part.split("=", 1)[0].strip() for part in found_vip_cookies]
+            print(f"[DEBUG] Found QQ Music account cookie fields: {', '.join(names)}")
         else:
-            print(f"[DEBUG] No VIP-related cookies found in: {cookie_str[:200]}...")
+            print("[DEBUG] No QQ Music account cookie fields found")
 
     def get_cookie(self) -> str:
         """获取当前 Cookie"""

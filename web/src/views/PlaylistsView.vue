@@ -2,8 +2,7 @@
 import { onMounted, ref, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { onBeforeRouteLeave } from 'vue-router'
-import { apiGet } from '../api'
-import { enqueueNeteaseTracks, summarizeBulkEnqueueFailures } from '../utils/queue'
+import { apiGet, apiPost } from '../api'
 import { getFavoritePlaylists, toggleFavoritePlaylist } from '../utils/favorites'
 import { 
   ListMusic, 
@@ -11,9 +10,7 @@ import {
   AlertCircle,
   Music,
   User,
-  Calendar,
   Play,
-  Plus,
   Heart,
   TrendingUp,
   Star
@@ -25,8 +22,9 @@ const router = useRouter()
 const error = ref('')
 const status = ref('')
 const loading = ref(false)
-const categories = ref<any[]>([])
-const selectedCategory = ref('全部')
+const selectedCategory = ref('热门')
+const playlistKeyword = ref('热门')
+const presetKeywords = ['热门', '华语', '流行', '经典', '轻音乐', '粤语', '日语', '英语']
 const playlists = ref<any[]>([])
 const highQualityPlaylists = ref<any[]>([])
 const recommendPlaylists = ref<any[]>([])
@@ -51,29 +49,25 @@ function toggleLocalFavPlaylist(pl: any) {
   refreshFavoritePlaylistIds()
 }
 
-async function loadCategories() {
-  try {
-    const res = await apiGet<any>('/netease/playlist/categories')
-    categories.value = res?.sub || []
-  } catch (e) {
-    console.error('Failed to load categories:', e)
-  }
-}
-
-async function loadPlaylists(cat: string = '全部') {
+async function loadPlaylists(cat: string = '热门') {
   loading.value = true
   error.value = ''
+  const query = (cat || playlistKeyword.value || '热门').trim() || '热门'
+  playlistKeyword.value = query
+  selectedCategory.value = query
   
   try {
-    const [topRes, highQualityRes, recommendRes] = await Promise.all([
-      apiGet<any>(`/netease/playlist/top?cat=${encodeURIComponent(cat)}&limit=30`),
-      apiGet<any>(`/netease/playlist/highquality?cat=${encodeURIComponent(cat)}&limit=10`),
-      apiGet<any>('/netease/recommend/playlists?limit=10')
-    ])
-    
-    playlists.value = topRes?.playlists || []
-    highQualityPlaylists.value = highQualityRes?.playlists || []
-    recommendPlaylists.value = recommendRes?.result || []
+    const res = await apiGet<any>(`/qqmusic/search/playlists?keywords=${encodeURIComponent(query)}&limit=30&page=1`)
+    playlists.value = (res?.playlists || []).map((playlist: any) => ({
+      id: Number(playlist.id),
+      name: String(playlist.name || playlist.id),
+      coverImgUrl: String(playlist.cover_url || ''),
+      playCount: Number(playlist.play_count || 0),
+      creator: { nickname: String(playlist.creator || '') },
+      trackCount: String(playlist.track_count || ''),
+    }))
+    highQualityPlaylists.value = []
+    recommendPlaylists.value = []
   } catch (e: any) {
     error.value = String(e?.message ?? e)
   } finally {
@@ -83,6 +77,7 @@ async function loadPlaylists(cat: string = '全部') {
 
 async function selectCategory(cat: string) {
   selectedCategory.value = cat
+  playlistKeyword.value = cat
   await loadPlaylists(cat)
 }
 
@@ -132,8 +127,8 @@ async function addPlaylistToQueue(playlist: any) {
   status.value = ''
   
   try {
-    const detailRes = await apiGet<any>(`/netease/playlist/${playlist.id}/detail`)
-    const tracks = detailRes?.playlist?.tracks || []
+    const detailRes = await apiGet<any>(`/qqmusic/playlist/${playlist.id}/songs`)
+    const tracks = detailRes?.songs || []
     
     if (tracks.length === 0) {
       error.value = '歌单为空或无法获取歌曲'
@@ -150,25 +145,69 @@ async function addPlaylistToQueue(playlist: any) {
       return
     }
 
-    const result = await enqueueNeteaseTracks(tracks, {
-      onProgress(current, total, title) {
-        status.value = `正在添加 ${current}/${total}：${title}`
-      },
-    })
-
-    if (result.failed.length > 0) {
-      error.value = `有 ${result.failed.length} 首歌曲添加失败：${summarizeBulkEnqueueFailures(result.failed)}`
+    let addedCount = 0
+    const failed: string[] = []
+    for (const [index, track] of tracks.entries()) {
+      const songMid = String(track?.mid || track?.songmid || '').trim()
+      const title = String(track?.name || songMid || '未知歌曲').trim()
+      status.value = `正在添加 ${index + 1}/${tracks.length}：${title}`
+      if (!songMid) {
+        failed.push(title)
+        continue
+      }
+      try {
+        await apiPost('/queue/qqmusic', {
+          song_mid: songMid,
+          title,
+          artist: getTrackArtist(track),
+          album: getTrackAlbum(track),
+          album_mid: getTrackAlbumMid(track),
+          cover_url: getTrackArtwork(track),
+          duration_ms: getTrackDurationMs(track),
+          quality: '320',
+          play_now: false,
+        })
+        addedCount++
+      } catch {
+        failed.push(title)
+      }
     }
 
-    status.value = result.failed.length > 0
-      ? `已添加 ${result.addedCount} 首歌曲到播放队列，${result.failed.length} 首失败`
-      : `已添加 ${result.addedCount} 首歌曲到播放队列`
+    if (failed.length > 0) {
+      error.value = `有 ${failed.length} 首歌曲添加失败：${failed.slice(0, 3).join('、')}${failed.length > 3 ? ' 等' : ''}`
+    }
+
+    status.value = failed.length > 0
+      ? `已添加 ${addedCount} 首歌曲到播放队列，${failed.length} 首失败`
+      : `已添加 ${addedCount} 首歌曲到播放队列`
     setTimeout(() => {
       status.value = ''
     }, 5000)
   } catch (e: any) {
     error.value = String(e?.message ?? e)
   }
+}
+
+function getTrackArtist(track: any): string {
+  return ((track?.singer || track?.artists) || []).map((artist: any) => artist?.name).filter(Boolean).join(', ')
+}
+
+function getTrackAlbum(track: any): string {
+  return String(track?.album?.name || track?.albumname || '').trim()
+}
+
+function getTrackAlbumMid(track: any): string {
+  return String(track?.album?.mid || track?.albummid || '').trim()
+}
+
+function getTrackArtwork(track: any): string {
+  const albumMid = getTrackAlbumMid(track)
+  return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ''
+}
+
+function getTrackDurationMs(track: any): number | undefined {
+  const interval = Number(track?.interval)
+  return Number.isFinite(interval) && interval > 0 ? interval * 1000 : undefined
 }
 
 function formatPlayCount(count: number): string {
@@ -183,11 +222,11 @@ function formatPlayCount(count: number): string {
 onMounted(() => {
   void (async () => {
     const saved = loadSavedState()
-    const savedCategory = typeof saved.category === 'string' && saved.category ? saved.category : '全部'
+    const savedCategory = typeof saved.category === 'string' && saved.category ? saved.category : '热门'
     selectedCategory.value = savedCategory
+    playlistKeyword.value = savedCategory
 
     refreshFavoritePlaylistIds()
-    await loadCategories()
     await loadPlaylists(selectedCategory.value)
     await restoreScroll(Number(saved.scrollTop ?? 0))
   })()
@@ -213,32 +252,37 @@ onMounted(() => {
         </button>
       </div>
       
-      <!-- Category filter -->
-      <div v-if="categories.length > 0" class="flex flex-wrap gap-2">
-        <button
-          @click="selectCategory('全部')"
-          class="px-4 py-1.5 text-sm rounded-full transition-all duration-200 font-medium border"
-          :class="[
-            selectedCategory === '全部' 
-              ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-200' 
-              : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300'
-          ]"
-        >
-          全部
-        </button>
-        <button
-          v-for="category in categories.slice(0, 15)"
-          :key="category.name"
-          @click="selectCategory(category.name)"
-          class="px-4 py-1.5 text-sm rounded-full transition-all duration-200 font-medium border"
-          :class="[
-            selectedCategory === category.name 
-              ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-200' 
-              : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300'
-          ]"
-        >
-          {{ category.name }}
-        </button>
+      <!-- QQ Music playlist search -->
+      <div class="flex flex-col gap-3">
+        <div class="flex gap-2">
+          <input
+            v-model="playlistKeyword"
+            type="search"
+            placeholder="搜索 QQ 音乐歌单..."
+            class="flex-1 px-4 py-2 bg-gray-100 border border-gray-200 rounded-lg text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            @keyup.enter="loadPlaylists(playlistKeyword)"
+          />
+          <button
+            @click="loadPlaylists(playlistKeyword)"
+            :disabled="loading || !playlistKeyword.trim()"
+            class="btn-primary text-sm px-4 disabled:opacity-50"
+          >
+            搜索
+          </button>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button
+            v-for="keyword in presetKeywords"
+            :key="keyword"
+            @click="selectCategory(keyword)"
+            class="px-3 py-1 text-xs rounded-full transition-all duration-200 font-medium border"
+            :class="selectedCategory === keyword
+              ? 'bg-blue-600 text-white border-blue-600'
+              : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300'"
+          >
+            {{ keyword }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -376,7 +420,7 @@ onMounted(() => {
         <section v-if="playlists.length > 0" class="fade-in">
           <h2 class="text-xl font-bold text-gray-900 mb-5 flex items-center gap-2">
             <ListMusic :size="24" class="text-blue-500" />
-            {{ selectedCategory }} 歌单
+            QQ 音乐 · {{ selectedCategory }} 歌单
           </h2>
           <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4 md:gap-6">
             <div
@@ -433,7 +477,7 @@ onMounted(() => {
           v-if="!loading && playlists.length === 0 && highQualityPlaylists.length === 0 && recommendPlaylists.length === 0"
           :icon="ListMusic"
           title="暂无歌单"
-          description="尝试选择其他分类或刷新页面"
+          description="尝试更换关键词或刷新页面"
         />
       </div>
     </div>

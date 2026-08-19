@@ -35,7 +35,7 @@ const hotSearches = ref<any[]>([])
 const showSuggestions = ref(false)
 const isSearchFocused = ref(false)
 const defaultKeyword = ref('')
-const selectedPlatform = ref<'netease' | 'qqmusic' | 'bilibili'>(appConfig.neteaseEnabled ? 'netease' : 'qqmusic')
+const selectedPlatform = ref<'netease' | 'qqmusic' | 'bilibili'>('qqmusic')
 const qqMusicConfigured = ref(false)
 const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
@@ -272,9 +272,11 @@ async function enqueue(song: any, playNow: boolean) {
         song_mid: String(song.mid || song.songmid),
         title: getSongTitle(song),
         artist: getSongArtist(song),
+        album: getSongAlbum(song),
         play_now: playNow,
         quality: "320",
         album_mid: String(song.album?.mid || song.albummid || ""),
+        cover_url: getSongArtwork(song),
         duration_ms: getSongDurationMs(song),
       })
       status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`

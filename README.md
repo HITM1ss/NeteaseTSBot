@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux-informational)
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Node](https://img.shields.io/badge/node-16%2B-brightgreen)
 ![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115.6-009688?logo=fastapi&logoColor=white)
@@ -18,7 +18,7 @@ TSBot 是一个基于 TeamSpeak 的音乐机器人；`voice-service` 主客户�
 - **网易云音乐搜索/歌单/喜欢/歌词**（通过外部 `NeteaseCloudMusicApi` 服务）
 - **QQ 音乐搜索/歌单/歌词/播放链接**（后端内建适配，登录态能力可通过 Web 控制台配置）
 - **B 站视频搜索与音频播放**（支持搜索视频、展示简介/点赞/收藏/投币，并在播放时缓存音频；有字幕的视频可在歌词页显示字幕时间轴，支持通过管理员登录态补抓 AI 字幕）
-- **Web 控制台**（Vue3 前端，用于搜索/队列/最近播放/本地收藏/歌词，以及受管理员密码保护的完整运行配置）
+- **Web 控制台**（Vue3 前端，用于 QQ 音乐/B 站搜索、QQ 音乐歌单、队列/最近播放/本地收藏/歌词，以及受管理员密码保护的完整运行配置）
 - **外部集成 API**（`/external/*` 提供统一搜索、入队、状态读取、历史读取与历史重播）
 ![预览图](docs/1.png)
 ![预览图](docs/2.png)
@@ -65,7 +65,7 @@ TSBot 的目标是把边界重新划清：
 ## 系统要求
 
 - **Linux**（推荐 Ubuntu 20.04+）
-- **Python**: 3.8+
+- **Python**: 3.10+（推荐 3.11，与 Docker 镜像一致）
 - **Node.js**: 16+
 - **Rust**: 1.70+（用于 `voice-service`）
 
@@ -98,15 +98,21 @@ TSBot 的目标是把边界重新划清：
 
 | 中文指令 | 英文指令 | 行为 |
 | --- | --- | --- |
-| `歌单 <关键词>` | `playlist <keywords>` | 仅检索网易云歌单，显示前 5 个结果；结果按当前 TeamSpeak 用户隔离并保留 5 分钟。 |
+| `歌单 <关键词>` | `playlist <keywords>` | 检索 QQ 音乐歌单，显示前 5 个结果；结果按当前 TeamSpeak 用户隔离并保留 5 分钟。 |
 | `选择 <编号>` | `select <number>` | 从当前用户最近一次歌单搜索结果中选择歌单，将可用曲目加入播放队列；空闲时自动开始播放。 |
 | `清空` | `clear` | 清空播放队列、停止当前播放、取消正在加载的曲目并重置随机队列。 |
 | `随机` / `随机播放` | `random` / `shuffle` | 切换为随机播放；空闲时立即从当前队列随机选择曲目。 |
 | `顺序` / `顺序播放` | `order` | 切换回队列顺序播放。 |
 | `播放` | `play` | 无参数时立即播放队列中的第一首歌曲。 |
-| `播放 <ID或关键词>` | `play <ID or keywords>` | 检索并立即播放指定网易云歌曲。 |
+| `搜索 <关键词>` | `search <keywords>` | 搜索 QQ 音乐歌曲并返回可用于点歌的 `song_mid`。 |
+| `增加 <song_mid或关键词>` | `add <song_mid or keywords>` | 将 QQ 音乐歌曲加入播放队列。 |
+| `播放 <song_mid或关键词>` | `play <song_mid or keywords>` | 检索并立即播放指定 QQ 音乐歌曲。 |
 
 可发送 `帮助`、`菜单`、`指令`、`help` 或 `?` 查看机器人返回的完整指令帮助。
+
+> TeamSpeak 点歌、歌单和搜索命令使用 QQ 音乐；请先在 Web 控制台的“系统配置 → 音乐会员登录”完成 QQ 音乐后台授权。网易云功能仍可单独启用，供现有 Web/API 功能过渡使用。
+>
+> 升级后队列中已有的 `netease:` 项仍保留原来源；如需完全改用 QQ 音乐，请先清空旧队列，再使用新的点歌命令重新入队。
 
 ## 网易云音乐支持（可选，依赖 `NeteaseCloudMusicApi`）
 
@@ -135,6 +141,7 @@ QQ 音乐能力由后端直接提供，不需要额外部署独立的 QQ 音乐 
 
 - 已提供搜索、歌曲详情、歌单详情、歌词、专辑/歌手/MV 信息等接口。
 - 播放链接、用户歌单等依赖登录态的能力，通常需要管理员 QQ 音乐 Cookie。
+- 队列中的 QQ 音乐歌曲会在真正开始播放时重新获取临时播放地址，避免“下一首”使用已过期链接；因此运行期间需要保持管理员 Cookie 有效。
 - 管理员可以通过 Web 控制台扫码登录，或调用 `/admin/qqmusic/*` 接口写入/确认 Cookie。
 
 ## B 站支持（内建）
@@ -241,6 +248,8 @@ make backend-setup
 make web-build
 make all
 ```
+
+如果系统的 `python3` 不是 3.10+，可以明确指定解释器，例如 `make backend-setup PYTHON=python3.11`。
 
 ### 3) 前台启动（生产方式）
 

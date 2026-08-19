@@ -195,15 +195,15 @@ x-netease-cookie: <cookie字符串>
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `keywords` | string | 是 | 搜索关键词 |
-| `source` | string | 否 | `netease`、`qqmusic` 或 `bilibili`，默认 `netease` |
+| `source` | string | 否 | `qqmusic`、`netease` 或 `bilibili`，默认 `qqmusic` |
 | `limit` | integer | 否 | 默认 `20`，最大 `50` |
 | `page` | integer | 否 | 页码，从 `1` 开始 |
 
-网易云示例：
+默认 QQ 音乐示例：
 
 ```bash
 curl -H "Authorization: Bearer <token>" \
-  "http://127.0.0.1:8009/external/search?source=netease&keywords=周杰伦"
+  "http://127.0.0.1:8009/external/search?keywords=周杰伦"
 ```
 
 QQ 音乐示例：
@@ -224,17 +224,16 @@ curl -H "Authorization: Bearer <token>" \
 
 ```json
 {
-  "source": "netease",
+  "source": "qqmusic",
   "keywords": "周杰伦",
   "page": 1,
   "limit": 20,
-  "total": 123,
   "has_more": true,
   "items": [
     {
-      "source": "netease",
-      "track_id": "netease:123456",
-      "song_id": "123456",
+      "source": "qqmusic",
+      "track_id": "qqmusic:003aAYrm3GE0Ac",
+      "song_mid": "003aAYrm3GE0Ac",
       "title": "稻香",
       "artist": "周杰伦",
       "album": "魔杰座",
@@ -267,7 +266,7 @@ B 站 `items` 里会使用 `video_id` / `webpage_url` 字段。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `source` | string | 否 | `netease`、`qqmusic` 或 `bilibili`，默认 `netease` |
+| `source` | string | 否 | `qqmusic`、`netease` 或 `bilibili`，默认 `qqmusic` |
 | `keywords` | string | 否 | 按关键词自动搜索第一条 |
 | `song_id` | string | 否 | 网易云歌曲 ID |
 | `song_mid` | string | 否 | QQ 音乐歌曲 MID |
@@ -291,16 +290,14 @@ B 站 `items` 里会使用 `video_id` / `webpage_url` 字段。
 - QQ 音乐实际入队和播放依赖服务端已配置管理员 QQ 音乐 cookie
 - B 站播放时会由后端下载音频到本地缓存后，再交给 `voice-service` 播放
 
-按关键词直接播放示例：
+按关键词通过默认 QQ 音乐直接播放示例：
 
 ```bash
 curl -X POST "http://127.0.0.1:8009/external/queue" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "source": "netease",
     "keywords": "稻香",
-    "level": "lossless",
     "play_now": true
   }'
 ```
@@ -341,14 +338,14 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 ```json
 {
   "ok": true,
-  "source": "netease",
+  "source": "qqmusic",
   "queue_id": 88,
   "trial": false,
   "play_now": true,
   "track": {
-    "source": "netease",
-    "track_id": "netease:123456",
-    "song_id": "123456",
+    "source": "qqmusic",
+    "track_id": "qqmusic:003aAYrm3GE0Ac",
+    "song_mid": "003aAYrm3GE0Ac",
     "title": "稻香",
     "artist": "周杰伦",
     "album": "魔杰座",
@@ -617,12 +614,16 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
   "song_mid": "003aAYrm3GE0Ac",
   "title": "江南",
   "artist": "林俊杰",
+  "album": "乐行者",
   "play_now": true,
   "quality": "320",
   "album_mid": "001fNHEf1SFEFN",
+  "cover_url": "https://y.gtimg.cn/...",
   "duration_ms": 269000
 }
 ```
+
+说明：`quality` 支持 `m4a`、`128` 和 `320`。非立即播放的 QQ 音乐队列项只保存歌曲 MID 和音质，真正开始播放时会使用管理员 Cookie 重新获取临时播放地址，因此不应把响应中的播放地址长期缓存。
 
 ### 6.3 `POST /queue/bilibili`
 
@@ -827,6 +828,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | --- | --- | --- |
 | `GET` | `/qqmusic/search` | 完整搜索接口 |
 | `GET` | `/qqmusic/search/songs` | 简化歌曲搜索 |
+| `GET` | `/qqmusic/search/playlists` | 简化歌单搜索 |
 | `GET` | `/qqmusic/song/{song_mid}/url` | 获取播放 URL |
 | `GET` | `/qqmusic/song/{song_mid}/lyric` | 获取歌词 |
 | `GET` | `/qqmusic/playlist/{playlist_id}` | 歌单详情 |
@@ -847,6 +849,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | `/qqmusic/search` | `limit` | 默认 `50` |
 | `/qqmusic/search` | `page` | 默认 `1` |
 | `/qqmusic/search/songs` | `keywords` | 搜索词 |
+| `/qqmusic/search/playlists` | `keywords` | 搜索词 |
 | `/qqmusic/song/{song_mid}/url` | `quality` | 默认 `320` |
 | `/qqmusic/song/{song_mid}/lyric` | `parse` | `true` 时返回解析后的结构 |
 

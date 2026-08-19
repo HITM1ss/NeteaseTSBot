@@ -83,7 +83,7 @@ function getSongWebpageUrl(song: FavoriteSong): string {
 
 function getSongSourceLabel(song: FavoriteSong): string {
   if (isBilibiliSong(song)) return 'B站'
-  if (song.source === 'qqmusic') return 'QQ音乐'
+  if (isQQMusicSong(song)) return 'QQ音乐'
   return '网易云（已禁用）'
 }
 
@@ -223,7 +223,6 @@ onMounted(refresh)
         </button>
 
         <button
-          v-if="appConfig.neteaseEnabled"
           class="btn-secondary text-sm py-1.5 px-3"
           :class="activeTab === 'playlists' ? 'bg-pink-50 text-pink-700 border-pink-200' : ''"
           @click="activeTab = 'playlists'"

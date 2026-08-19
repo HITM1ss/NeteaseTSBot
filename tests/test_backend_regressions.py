@@ -212,48 +212,211 @@ class NeteaseFeatureFlagTests(unittest.IsolatedAsyncioTestCase):
 class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main._ts_playlist_results.clear()
-        self.netease_enabled = patch.object(main.settings, "enable_netease", True)
-        self.netease_enabled.start()
-
-    def tearDown(self) -> None:
-        self.netease_enabled.stop()
-
-    async def test_playlist_search_then_select_enqueues_netease_tracks(self) -> None:
+    async def test_playlist_search_then_select_enqueues_qqmusic_tracks(self) -> None:
         search_result = {
-            "result": {
-                "playlists": [
-                    {
-                        "id": 123,
-                        "name": "测试歌单",
-                        "creator": {"nickname": "创建者"},
-                        "trackCount": 2,
+            "req": {
+                "data": {
+                    "body": {
+                        "diss": {
+                            "list": [
+                                {
+                                    "dissid": "123",
+                                    "dissname": "测试歌单",
+                                    "creator": {"nick": "创建者"},
+                                    "song_count": 2,
+                                }
+                            ]
+                        }
                     }
-                ]
+                }
             }
         }
         tracks = [
-            {"id": 1, "name": "歌曲一", "ar": [{"name": "歌手一"}], "al": {"name": "专辑一"}},
-            {"id": 2, "name": "歌曲二", "ar": [{"name": "歌手二"}], "al": {"name": "专辑二"}},
+            {"songmid": "mid001", "name": "歌曲一", "singer": [{"name": "歌手一"}], "album": {"mid": "alb001", "name": "专辑一"}, "interval": 180},
+            {"songmid": "mid002", "name": "歌曲二", "singer": [{"name": "歌手二"}], "album": {"mid": "alb002", "name": "专辑二"}, "interval": 200},
         ]
 
         with (
-            patch.object(main.netease, "search", AsyncMock(return_value=search_result)) as search,
-            patch.object(main.netease, "playlist_detail", AsyncMock(return_value={"playlist": {"name": "测试歌单"}})),
-            patch.object(main, "_load_netease_playlist_tracks", AsyncMock(return_value=("测试歌单", tracks))),
-            patch.object(main, "_enqueue_netease_song", AsyncMock(return_value=(1, False))) as enqueue,
-            patch.object(main, "_get_admin_cookie_or_none", return_value="cookie"),
+            patch.object(main.qqmusic, "search_with_keyword", AsyncMock(return_value=search_result)) as search,
+            patch.object(main, "_load_qqmusic_playlist_tracks", AsyncMock(return_value=("测试歌单", tracks))),
+            patch.object(main, "_enqueue_qqmusic_song", AsyncMock(return_value=(1, False))) as enqueue,
             patch.object(main.voice, "get_status", AsyncMock(return_value=SimpleNamespace(state="STATE_PLAYING"))),
             patch.object(main.voice, "send_notice", AsyncMock()) as notice,
         ):
             await main._handle_chat_command("Alice", "playlist 测试", invoker_unique_id="alice-uid")
             await main._handle_chat_command("Alice", "select 1", invoker_unique_id="alice-uid")
 
-        search.assert_awaited_once_with(keywords="测试", limit=5, type_=1000)
+        search.assert_awaited_once_with("测试", search_type=3, result_num=5, page_num=1)
         self.assertEqual(2, enqueue.await_count)
-        self.assertEqual("1", enqueue.await_args_list[0].kwargs["song_id"])
-        self.assertEqual("2", enqueue.await_args_list[1].kwargs["song_id"])
+        self.assertEqual("mid001", enqueue.await_args_list[0].kwargs["song_mid"])
+        self.assertEqual("mid002", enqueue.await_args_list[1].kwargs["song_mid"])
         self.assertIn("使用 select <编号>", notice.await_args_list[0].args[0])
         self.assertIn("已从歌单《测试歌单》加入 2 首歌曲", notice.await_args_list[1].args[0])
+
+    async def test_keyword_play_uses_qqmusic_without_netease_cookie(self) -> None:
+        songs = [{
+            "songmid": "mid12345",
+            "name": "测试歌曲",
+            "singer": [{"name": "测试歌手"}],
+            "album": {"mid": "alb123", "name": "测试专辑"},
+            "interval": 210,
+        }]
+
+        with (
+            patch.object(main.qqmusic, "search_songs_simple", AsyncMock(return_value=songs)) as search,
+            patch.object(main, "_enqueue_qqmusic_song", AsyncMock(return_value=(7, False))) as enqueue,
+            patch.object(main.netease, "search", AsyncMock()) as netease_search,
+            patch.object(main.voice, "get_status", AsyncMock(return_value=SimpleNamespace(state="STATE_PLAYING"))),
+            patch.object(main.voice, "send_notice", AsyncMock()) as notice,
+        ):
+            await main._handle_chat_command("Alice", "点歌 测试歌曲")
+
+        search.assert_awaited_once_with("测试歌曲", limit=1, page=1)
+        netease_search.assert_not_awaited()
+        enqueue.assert_awaited_once_with(
+            song_mid="mid12345",
+            title="测试歌曲",
+            artist="测试歌手",
+            play_now=False,
+            requested_by="Alice",
+            quality="320",
+            album_mid="alb123",
+            album="测试专辑",
+            artwork_url="https://y.gtimg.cn/music/photo_new/T002R300x300M000alb123.jpg",
+            duration_ms=210000,
+        )
+        self.assertIn("已加入队列", notice.await_args.args[0])
+
+    async def test_search_uses_qqmusic_when_netease_is_disabled(self) -> None:
+        songs = [{
+            "songmid": "mid12345",
+            "name": "测试歌曲",
+            "singer": [{"name": "测试歌手"}],
+        }]
+
+        with (
+            patch.object(main.settings, "enable_netease", False),
+            patch.object(main.qqmusic, "search_songs_simple", AsyncMock(return_value=songs)) as search,
+            patch.object(main.netease, "search", AsyncMock()) as netease_search,
+            patch.object(main.voice, "send_notice", AsyncMock()) as notice,
+        ):
+            await main._handle_chat_command("Alice", "搜索 测试歌曲")
+
+        search.assert_awaited_once_with("测试歌曲", limit=5, page=1)
+        netease_search.assert_not_awaited()
+        self.assertIn("QQ 音乐搜索结果", notice.await_args.args[0])
+
+    async def test_direct_qqmusic_mid_skips_search(self) -> None:
+        with (
+            patch.object(main.qqmusic, "search_songs_simple", AsyncMock()) as search,
+            patch.object(main, "_enqueue_qqmusic_song", AsyncMock(return_value=(8, False))) as enqueue,
+            patch.object(main.voice, "get_status", AsyncMock(return_value=SimpleNamespace(state="STATE_PLAYING"))),
+            patch.object(main.voice, "send_notice", AsyncMock()),
+        ):
+            await main._handle_chat_command("Alice", "add 003aAYrm3GE0Ac")
+
+        search.assert_not_awaited()
+        enqueue.assert_awaited_once_with(
+            song_mid="003aAYrm3GE0Ac",
+            title="003aAYrm3GE0Ac",
+            artist="",
+            play_now=False,
+            requested_by="Alice",
+            quality="320",
+            album_mid="",
+            album="",
+            artwork_url="",
+            duration_ms=None,
+        )
+
+    async def test_point_song_reports_missing_qqmusic_authorization(self) -> None:
+        with (
+            patch.object(
+                main.qqmusic,
+                "search_songs_simple",
+                AsyncMock(return_value=[{"songmid": "mid12345", "name": "测试歌曲"}]),
+            ),
+            patch.object(
+                main,
+                "_enqueue_qqmusic_song",
+                AsyncMock(side_effect=HTTPException(status_code=400, detail="admin qqmusic cookie not set")),
+            ),
+            patch.object(main.voice, "send_notice", AsyncMock()) as notice,
+        ):
+            await main._handle_chat_command("Alice", "点歌 测试歌曲")
+
+        self.assertIn("QQ 音乐后台授权未配置", notice.await_args.args[0])
+
+
+class ExternalQQMusicDefaultTests(unittest.IsolatedAsyncioTestCase):
+    def test_queue_request_defaults_to_qqmusic(self) -> None:
+        self.assertEqual("qqmusic", main.ExternalQueueRequest().source)
+
+    async def test_queue_treats_an_empty_source_as_qqmusic(self) -> None:
+        request = main.ExternalQueueRequest(source="", song_mid="mid12345", title="测试歌曲")
+
+        with patch.object(main, "_enqueue_qqmusic_song", AsyncMock(return_value=(9, False))) as enqueue:
+            result = await main.external_add_queue(request)
+
+        enqueue.assert_awaited_once_with(
+            song_mid="mid12345",
+            title="测试歌曲",
+            artist="",
+            play_now=False,
+            requested_by="external_api",
+            quality="320",
+            album_mid="",
+            album="",
+            artwork_url="",
+            duration_ms=None,
+        )
+        self.assertEqual("qqmusic", result["source"])
+
+    async def test_queue_accepts_qqmusic_mid_without_title(self) -> None:
+        request = main.ExternalQueueRequest(source="qqmusic", song_mid="mid12345")
+
+        with patch.object(main, "_enqueue_qqmusic_song", AsyncMock(return_value=(10, False))) as enqueue:
+            result = await main.external_add_queue(request)
+
+        self.assertEqual("mid12345", enqueue.await_args.kwargs["title"])
+        self.assertEqual("mid12345", result["track"]["title"])
+
+    async def test_search_defaults_to_qqmusic(self) -> None:
+        songs = [{
+            "songmid": "mid12345",
+            "name": "测试歌曲",
+            "singer": [{"name": "测试歌手"}],
+        }]
+
+        with (
+            patch.object(main.qqmusic, "search_songs_simple", AsyncMock(return_value=songs)) as search,
+            patch.object(main.netease, "search", AsyncMock()) as netease_search,
+        ):
+            result = await main.external_search("测试歌曲")
+
+        search.assert_awaited_once_with("测试歌曲", limit=20, page=1)
+        netease_search.assert_not_awaited()
+        self.assertEqual("qqmusic", result["source"])
+        self.assertEqual("mid12345", result["items"][0]["song_mid"])
+
+    async def test_playlist_search_endpoint_uses_qqmusic(self) -> None:
+        raw = {
+            "req": {
+                "data": {
+                    "body": {
+                        "diss": {
+                            "list": [{"dissid": "123", "dissname": "测试歌单"}]
+                        }
+                    }
+                }
+            }
+        }
+        with patch.object(main.qqmusic, "search_with_keyword", AsyncMock(return_value=raw)) as search:
+            result = await main.qqmusic_search_playlists("测试", limit=5, page=2)
+
+        search.assert_awaited_once_with("测试", search_type=3, result_num=5, page_num=2)
+        self.assertEqual("测试歌单", result["playlists"][0]["name"])
+        self.assertEqual(2, result["page"])
 
     async def test_play_without_argument_plays_first_queue_item(self) -> None:
         row = SimpleNamespace(id=42, title="队首歌曲", artist="歌手")
@@ -343,8 +506,159 @@ class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(("123", "歌曲", "歌手一, 歌手二"), main._extract_song_meta_from_search_first(raw))
 
+    def test_qqmusic_playlist_search_normalizes_cover_and_creator(self) -> None:
+        raw = {
+            "req": {
+                "data": {
+                    "body": {
+                        "diss": {
+                            "list": [
+                                {
+                                    "dissid": "123456",
+                                    "dissname": "热门歌单",
+                                    "creator": {"nick": "创建者"},
+                                    "song_count": 12,
+                                    "logo": "//y.gtimg.cn/cover.jpg",
+                                    "listennum": 3456,
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(
+            [{
+                "id": "123456",
+                "name": "热门歌单",
+                "creator": "创建者",
+                "track_count": "12",
+                "cover_url": "https://y.gtimg.cn/cover.jpg",
+                "play_count": "3456",
+            }],
+            main._extract_qqmusic_playlist_search_items(raw),
+        )
+
+
+class QQMusicQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queued_song_defers_url_lookup_until_playback(self) -> None:
+        session = unittest.mock.Mock()
+        with (
+            patch.object(main, "new_session", return_value=session),
+            patch.object(
+                main,
+                "QueueItem",
+                side_effect=lambda **kwargs: SimpleNamespace(id=17, **kwargs),
+            ) as queue_item,
+            patch.object(main, "_get_admin_qqmusic_cookie", return_value="qq-cookie"),
+            patch.object(main.qqmusic, "set_cookie") as set_cookie,
+            patch.object(main.qqmusic, "get_music_url_simple", AsyncMock()) as get_url,
+            patch.object(main, "_schedule_ts_description_update"),
+        ):
+            result = await main._enqueue_qqmusic_song(
+                song_mid="003aAYrm3GE0Ac",
+                title="测试歌曲",
+                artist="测试歌手",
+                album="测试专辑",
+                artwork_url="https://example.test/cover.jpg",
+                play_now=False,
+                requested_by="Alice",
+                quality="320",
+                album_mid="alb123",
+                duration_ms=210000,
+            )
+
+        self.assertEqual((17, False), result)
+        set_cookie.assert_called_once_with("qq-cookie")
+        get_url.assert_not_awaited()
+        created = queue_item.call_args.kwargs
+        self.assertEqual("__qqmusic_quality__:320", created["source_url"])
+        self.assertEqual("测试专辑", created["album"])
+        self.assertEqual("https://example.test/cover.jpg", created["cover_url"])
+        session.close.assert_called_once_with()
+
+    async def test_playing_queued_song_refreshes_qqmusic_url(self) -> None:
+        queued = SimpleNamespace(
+            id=17,
+            track_id="qqmusic:003aAYrm3GE0Ac",
+            title="测试歌曲",
+            artist="测试歌手",
+            album="测试专辑",
+            duration=210000,
+            cover_url="https://example.test/cover.jpg",
+            source_url="__qqmusic_quality__:128",
+        )
+        session = unittest.mock.Mock()
+        session.get.return_value = queued
+
+        with (
+            patch.object(main, "new_session", return_value=session),
+            patch.object(main, "_begin_play_request", AsyncMock(return_value=1)),
+            patch.object(main, "_is_play_request_current", AsyncMock(return_value=True)),
+            patch.object(main, "_clear_pending_queue_item_if_match", AsyncMock()),
+            patch.object(main, "_get_admin_qqmusic_cookie", return_value="qq-cookie"),
+            patch.object(main.qqmusic, "set_cookie") as set_cookie,
+            patch.object(main.qqmusic, "get_music_url_simple", AsyncMock(return_value="https://cdn.example.test/fresh.mp3")) as get_url,
+            patch.object(main, "_set_now_playing_queue_item", AsyncMock()) as set_now_playing,
+            patch.object(main.voice, "play", AsyncMock()) as play,
+            patch.object(main, "HistoryItem", side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+        ):
+            result = await main._play_queue_item_internal(17, requested_by="Alice")
+
+        self.assertTrue(result)
+        set_cookie.assert_called_once_with("qq-cookie")
+        get_url.assert_awaited_once_with("003aAYrm3GE0Ac", "128")
+        self.assertEqual("__qqmusic_quality__:128|https://cdn.example.test/fresh.mp3", queued.source_url)
+        set_now_playing.assert_awaited_once_with(
+            17,
+            "https://cdn.example.test/fresh.mp3",
+            duration_ms=210000,
+            artist="测试歌手",
+            album="测试专辑",
+            artwork_url="https://example.test/cover.jpg",
+        )
+        play.assert_awaited_once_with(
+            source_url="https://cdn.example.test/fresh.mp3",
+            title="测试歌曲",
+            requested_by="Alice",
+            notice="",
+        )
+        session.close.assert_called_once_with()
+
+    def test_blank_qqmusic_cookie_is_not_configured(self) -> None:
+        session = unittest.mock.Mock()
+        session.get.return_value = unittest.mock.Mock(value="encrypted-empty-cookie")
+
+        with patch.object(main, "decrypt_text", return_value="  "):
+            with self.assertRaises(HTTPException) as raised:
+                main._get_admin_qqmusic_cookie(session)
+
+        self.assertEqual(400, raised.exception.status_code)
+
 
 class PlaybackCompletionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shuffle_next_skips_legacy_netease_row_without_cookie_error(self) -> None:
+        with (
+            patch.object(main, "_shuffle_enabled", True),
+            patch.object(main, "_shuffle_queue", [42]),
+            patch.object(main, "_current_shuffle_index", -1),
+            patch.object(main, "_current_queue_item_id", None),
+            patch.object(main, "_pending_queue_item_id", None),
+            patch.object(
+                main,
+                "_play_queue_item_internal",
+                AsyncMock(side_effect=HTTPException(status_code=400, detail="admin netease cookie not set")),
+            ),
+            patch.object(main, "_delete_queue_item", AsyncMock()) as delete_item,
+            patch.object(main, "_auto_play_next_from_queue", AsyncMock()) as play_next,
+        ):
+            result = await main.voice_next()
+
+        self.assertEqual("skipped_legacy_netease", result["action"])
+        delete_item.assert_awaited_once_with(42)
+        play_next.assert_awaited_once_with(start_after_id=42)
+
     async def test_repeat_one_replays_finished_item_without_deleting_it(self) -> None:
         with (
             patch.object(main, "_repeat_mode", "one"),

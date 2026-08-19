@@ -5,7 +5,7 @@ TSBot 是一个基于 TeamSpeak 的音乐机器人，包含 Python 后端、Vue 
 ## 系统要求
 
 - **操作系统**: Linux（推荐 Ubuntu 20.04+）或 Windows 10/11（推荐 PowerShell 7+）
-- **Python**: 3.8+
+- **Python**: 3.10+（推荐 3.11，与 Docker 镜像一致）
 - **Node.js**: 16+
 - **CMake**: 3.16+
 - **Rust**: 1.70+（推荐，默认语音服务实现）
@@ -70,6 +70,8 @@ make backend-setup  # 创建后端虚拟环境并安装依赖
 make web-build      # 安装前端依赖并构建生产产物
 make voice-build    # 构建语音服务
 ```
+
+如果 `python3` 不是 3.10+，请改用例如 `make backend-setup PYTHON=python3.11`。
 
 ## 运行项目
 

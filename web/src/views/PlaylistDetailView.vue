@@ -2,7 +2,6 @@
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiGet, apiPost } from '../api'
-import { buildNeteaseQueuePayload, enqueueNeteaseTracks, summarizeBulkEnqueueFailures } from '../utils/queue'
 import { 
   ArrowLeft, 
   Play, 
@@ -17,7 +16,7 @@ import {
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import EmptyState from '../components/EmptyState.vue'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
-import { getFavoritePlaylists, getFavoriteSongs, toggleFavoritePlaylist, toggleFavoriteSong } from '../utils/favorites'
+import { getFavoriteSongKey, getFavoritePlaylists, getFavoriteSongs, toggleFavoritePlaylist, toggleFavoriteSong } from '../utils/favorites'
 import { useTransientMessage } from '../composables/useTransientMessage'
 
 const route = useRoute()
@@ -32,16 +31,15 @@ const tracks = ref<any[]>([])
 const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
 const isFavPlaylist = ref(false)
-const favSongIds = ref<Set<number>>(new Set())
+const favSongKeys = ref<Set<string>>(new Set())
 
 function refreshFavSongs() {
-  favSongIds.value = new Set(getFavoriteSongs().map((s) => Number(s.id)))
+  favSongKeys.value = new Set(getFavoriteSongs().map((song) => getFavoriteSongKey(song)).filter(Boolean))
 }
 
 function isFavSong(track: any): boolean {
-  const id = Number(track?.id)
-  if (!Number.isFinite(id) || id <= 0) return false
-  return favSongIds.value.has(id)
+  const key = getFavoriteSongKey(track)
+  return Boolean(key && favSongKeys.value.has(key))
 }
 
 function toggleSong(track: any) {
@@ -70,10 +68,19 @@ async function loadPlaylistDetail() {
   error.value = ''
   
   try {
-    const res = await apiGet<any>(`/netease/playlist/${playlistId}/detail`)
-    if (res?.playlist) {
-      playlist.value = res.playlist
-      tracks.value = res.playlist.tracks || []
+    const res = await apiGet<any>(`/qqmusic/playlist/${playlistId}`)
+    const detail = res?.cdlist?.[0]
+    if (detail) {
+      playlist.value = {
+        id: Number(detail.disstid || playlistId),
+        name: String(detail.dissname || detail.name || playlistId),
+        coverImgUrl: normalizeCoverUrl(detail.logo || detail.cover || ''),
+        playCount: Number(detail.listennum || detail.play_count || 0),
+        creator: { nickname: String(detail.nickname || detail.creator?.nick || '') },
+        description: String(detail.desc || detail.introduction || ''),
+        createTime: Number(detail.create_time || detail.createtime || 0),
+      }
+      tracks.value = Array.isArray(detail.songlist) ? detail.songlist : []
       refreshFavSongs()
       refreshFavPlaylist()
     } else {
@@ -102,29 +109,35 @@ async function playAll() {
     return
   }
 
-  const result = await enqueueNeteaseTracks(tracks.value, {
-    playFirst: true,
-    onProgress(current, total, title) {
-      status.value = `正在添加 ${current}/${total}：${title}`
-    },
-  })
-
-  if (result.failed.length > 0) {
-    error.value = `有 ${result.failed.length} 首歌曲添加失败：${summarizeBulkEnqueueFailures(result.failed)}`
+  let addedCount = 0
+  const failed: string[] = []
+  for (const [index, track] of tracks.value.entries()) {
+    const title = getTrackTitle(track)
+    status.value = `正在添加 ${index + 1}/${tracks.value.length}：${title}`
+    try {
+      await enqueueQQMusicTrack(track, index === 0)
+      addedCount++
+    } catch {
+      failed.push(title)
+    }
   }
-  
-  status.value = result.failed.length > 0
-    ? `已添加 ${result.addedCount} 首歌曲到播放队列，${result.failed.length} 首失败`
-    : `已添加 ${result.addedCount} 首歌曲到播放队列`
+
+  if (failed.length > 0) {
+    error.value = `有 ${failed.length} 首歌曲添加失败：${failed.slice(0, 3).join('、')}${failed.length > 3 ? ' 等' : ''}`
+  }
+
+  status.value = failed.length > 0
+    ? `已添加 ${addedCount} 首歌曲到播放队列，${failed.length} 首失败`
+    : `已添加 ${addedCount} 首歌曲到播放队列`
   setTimeout(() => status.value = '', 5000)
 }
 
 async function enqueue(track: any, playNow: boolean = false) {
   try {
-    await apiPost('/queue/netease', buildNeteaseQueuePayload(track, playNow))
+    await enqueueQQMusicTrack(track, playNow)
     
     if (!status.value) { // Don't overwrite bulk status
-      status.value = `已添加 "${track.name}" 到队列${playNow ? ' (正在播放)' : ''}`
+      status.value = `已添加 "${getTrackTitle(track)}" 到队列${playNow ? ' (正在播放)' : ''}`
       setTimeout(() => status.value = '', 3000)
     }
   } catch (e: any) {
@@ -134,10 +147,64 @@ async function enqueue(track: any, playNow: boolean = false) {
   }
 }
 
-function formatDuration(dt: number): string {
-  if (!dt) return '--:--'
-  const date = new Date(dt)
-  return `${date.getMinutes()}:${date.getSeconds().toString().padStart(2, '0')}`
+async function enqueueQQMusicTrack(track: any, playNow: boolean): Promise<void> {
+  const songMid = getTrackSongMid(track)
+  if (!songMid) throw new Error('未找到 QQ 音乐歌曲 MID')
+  await apiPost('/queue/qqmusic', {
+    song_mid: songMid,
+    title: getTrackTitle(track),
+    artist: getTrackArtist(track),
+    album: getTrackAlbum(track),
+    album_mid: getTrackAlbumMid(track),
+    cover_url: getTrackArtwork(track),
+    duration_ms: getTrackDurationMs(track),
+    quality: '320',
+    play_now: playNow,
+  })
+}
+
+function getTrackSongMid(track: any): string {
+  return String(track?.mid || track?.songmid || '').trim()
+}
+
+function getTrackTitle(track: any): string {
+  return String(track?.name || getTrackSongMid(track) || '未知歌曲').trim()
+}
+
+function getTrackArtist(track: any): string {
+  return ((track?.singer || track?.artists) || []).map((artist: any) => artist?.name).filter(Boolean).join(', ')
+}
+
+function getTrackAlbum(track: any): string {
+  return String(track?.album?.name || track?.albumname || '').trim()
+}
+
+function getTrackAlbumMid(track: any): string {
+  return String(track?.album?.mid || track?.albummid || '').trim()
+}
+
+function getTrackArtwork(track: any): string {
+  const albumMid = getTrackAlbumMid(track)
+  return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ''
+}
+
+function getTrackDurationMs(track: any): number | undefined {
+  const interval = Number(track?.interval)
+  return Number.isFinite(interval) && interval > 0 ? interval * 1000 : undefined
+}
+
+function normalizeCoverUrl(value: any): string {
+  const raw = String(value || '').trim()
+  if (raw.startsWith('//')) return `https:${raw}`
+  return raw
+}
+
+function formatDuration(durationMs?: number): string {
+  const ms = Number(durationMs)
+  if (!Number.isFinite(ms) || ms <= 0) return '--:--'
+  const minutes = Math.floor(ms / 60000)
+  const seconds = Math.floor((ms % 60000) / 1000)
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`
 }
 
 function formatDate(timestamp: number): string {
@@ -288,28 +355,28 @@ onMounted(() => {
             <tbody class="divide-y divide-gray-50">
               <tr 
                 v-for="(track, index) in tracks" 
-                :key="track.id" 
+                :key="track.mid || track.songmid || track.id || index"
                 class="group hover:bg-blue-50/50 transition-colors duration-200"
               >
                 <td class="px-3 md:px-6 py-3 md:py-4 text-center text-gray-400 text-sm group-hover:text-blue-600 font-medium w-10 md:w-16">
                   {{ index + 1 }}
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4">
-                  <div class="font-semibold text-gray-900 line-clamp-1 text-base">{{ track.name }}</div>
+                  <div class="font-semibold text-gray-900 line-clamp-1 text-base">{{ getTrackTitle(track) }}</div>
                   <div class="text-xs text-gray-500 md:hidden line-clamp-1 mt-1">
-                    {{ (track.ar || []).map((a: any) => a.name).join(', ') }}
+                    {{ getTrackArtist(track) }}
                   </div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-sm text-gray-600 hidden md:table-cell max-w-[200px]">
                   <div class="truncate hover:text-gray-900 transition-colors">
-                    {{ (track.ar || []).map((a: any) => a.name).join(', ') }}
+                    {{ getTrackArtist(track) }}
                   </div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-sm text-gray-500 hidden lg:table-cell max-w-[200px]">
-                  <div class="truncate hover:text-gray-700 transition-colors">{{ track.al?.name }}</div>
+                  <div class="truncate hover:text-gray-700 transition-colors">{{ getTrackAlbum(track) }}</div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right text-sm text-gray-400 font-mono tabular-nums">
-                  {{ formatDuration(track.dt) }}
+                  {{ formatDuration(getTrackDurationMs(track)) }}
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right">
                   <div class="flex items-center justify-end gap-2 md:opacity-0 group-hover:opacity-100 transition-all duration-200 md:transform md:translate-x-2 group-hover:translate-x-0">

@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux-informational)
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Node](https://img.shields.io/badge/node-16%2B-brightgreen)
 ![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115.6-009688?logo=fastapi&logoColor=white)
@@ -62,7 +62,7 @@ More docs:
 ## System Requirements
 
 - **Linux** (Ubuntu 20.04+ recommended)
-- **Python**: 3.8+
+- **Python**: 3.10+ (3.11 recommended; matches the Docker image)
 - **Node.js**: 16+
 - **Rust**: 1.70+ (for `voice-service`)
 
@@ -186,6 +186,8 @@ make backend-setup
 make web-build
 make all
 ```
+
+If `python3` is older than 3.10, select a supported interpreter explicitly, for example: `make backend-setup PYTHON=python3.11`.
 
 ### 3) Foreground Startup (production-style)
 

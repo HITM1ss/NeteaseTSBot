@@ -118,6 +118,7 @@ _NETEASE_QUALITY_LEVELS = (
     "jymaster",
 )
 _NETEASE_QUEUE_META_PREFIX = "__netease_level__:"
+_QQMUSIC_QUEUE_META_PREFIX = "__qqmusic_quality__:"
 
 # Add OPTIONS handler for CORS preflight requests
 @app.options("/{full_path:path}")
@@ -235,9 +236,11 @@ class AddQQMusicQueueRequest(BaseModel):
     song_mid: str
     title: str
     artist: str = ""
+    album: str = ""
     play_now: bool = False
     quality: str = "320"
     album_mid: str = ""
+    cover_url: str = ""
     duration_ms: int | None = None
 
 
@@ -276,7 +279,7 @@ class ExternalPlayerActionRequest(BaseModel):
 
 
 class ExternalQueueRequest(BaseModel):
-    source: str = "netease"
+    source: str = "qqmusic"
     keywords: str = ""
     song_id: str = ""
     song_mid: str = ""
@@ -724,6 +727,29 @@ async def _play_queue_item_internal(item_id: int, *, requested_by: str) -> bool:
 
             session.add(item)
             session.commit()
+        elif item.track_id.startswith("qqmusic:"):
+            # QQ Music URLs are short-lived. Refresh the URL whenever a queued
+            # item starts instead of relying on the URL captured at enqueue time.
+            song_mid = item.track_id.split(":", 1)[1].strip()
+            if not song_mid:
+                raise HTTPException(status_code=400, detail="qqmusic song_mid is empty")
+
+            cookie = _get_admin_qqmusic_cookie(session)
+            qqmusic.set_cookie(cookie)
+            quality = _extract_qqmusic_queue_quality(source_url)
+            playback_source_url = await qqmusic.get_music_url_simple(song_mid, quality)
+            if not playback_source_url:
+                raise HTTPException(
+                    status_code=404,
+                    detail="无法获取 QQ 音乐播放链接，可能需要 VIP 会员或该歌曲不可用",
+                )
+
+            if not await _is_play_request_current(play_request_generation):
+                return True
+
+            item.source_url = _encode_qqmusic_queue_source(quality, playback_source_url)
+            session.add(item)
+            session.commit()
         elif item.track_id.startswith("bilibili:"):
             video_id = item.track_id.split(":", 1)[1]
             duration_ms, artist, album, artwork_url = await _hydrate_bilibili_track_metadata(
@@ -937,11 +963,32 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
     finally:
         session.close()
 
-    await _play_queue_item_internal(item_id, requested_by="auto")
+    try:
+        played = await _play_queue_item_internal(item_id, requested_by="auto")
+    except HTTPException as exc:
+        detail = str(exc.detail or "").strip()
+        # Old Netease rows are intentionally retained during migration, but a
+        # missing legacy cookie must not block newer QQ Music items.
+        if detail in {"admin netease cookie not set", "网易云功能已禁用"}:
+            await _delete_queue_item(item_id)
+            await _auto_play_next_from_queue(start_after_id=item_id)
+            return
+        raise
+    if not played:
+        # Compatibility queues may still contain disabled Netease items (or a
+        # row may disappear between selection and playback). Do not let one
+        # stale row block all subsequent QQ Music/Bilibili items.
+        await _delete_queue_item(item_id)
+        await _auto_play_next_from_queue(start_after_id=item_id)
 
 
 def _serialize_queue_item(row: QueueItem) -> dict:
-    source_url = _strip_netease_queue_meta(row.source_url) if row.track_id.startswith("netease:") else row.source_url
+    if row.track_id.startswith("netease:"):
+        source_url = _strip_netease_queue_meta(row.source_url)
+    elif row.track_id.startswith("qqmusic:"):
+        source_url = _strip_qqmusic_queue_meta(row.source_url)
+    else:
+        source_url = row.source_url
     track_ref = _build_track_reference(str(row.track_id or ""))
     return {
         "id": row.id,
@@ -1084,6 +1131,42 @@ def _is_netease_queue_meta(source_url: object) -> bool:
     return raw.startswith(_NETEASE_QUEUE_META_PREFIX)
 
 
+def _normalize_qqmusic_quality(value: object, *, default: str = "320") -> str:
+    raw = str(value or "").strip().lower()
+    aliases = {
+        "m4a": "m4a",
+        "128": "128",
+        "128k": "128",
+        "320": "320",
+        "320k": "320",
+    }
+    return aliases.get(raw, default)
+
+
+def _encode_qqmusic_queue_source(quality: object, source_url: str = "") -> str:
+    normalized = _normalize_qqmusic_quality(quality)
+    resolved_source_url = str(source_url or "").strip()
+    if resolved_source_url:
+        return f"{_QQMUSIC_QUEUE_META_PREFIX}{normalized}|{resolved_source_url}"
+    return f"{_QQMUSIC_QUEUE_META_PREFIX}{normalized}"
+
+
+def _extract_qqmusic_queue_quality(source_url: object) -> str:
+    raw = str(source_url or "").strip()
+    if raw.startswith(_QQMUSIC_QUEUE_META_PREFIX):
+        quality_raw, _, _rest = raw[len(_QQMUSIC_QUEUE_META_PREFIX) :].partition("|")
+        return _normalize_qqmusic_quality(quality_raw)
+    return "320"
+
+
+def _strip_qqmusic_queue_meta(source_url: object) -> str:
+    raw = str(source_url or "").strip()
+    if not raw.startswith(_QQMUSIC_QUEUE_META_PREFIX):
+        return raw
+    _quality, sep, rest = raw[len(_QQMUSIC_QUEUE_META_PREFIX) :].partition("|")
+    return rest.strip() if sep else ""
+
+
 def _extract_netease_artist_names(song: dict) -> str:
     artists = (song.get("ar") or song.get("artists") or [])
     if not isinstance(artists, list):
@@ -1180,6 +1263,108 @@ def _normalize_qqmusic_search_items(songs: list[dict]) -> list[dict]:
         if normalized is not None:
             items.append(normalized)
     return items
+
+
+def _extract_qqmusic_playlist_search_items(raw: dict) -> list[dict[str, str]]:
+    """Normalize QQ Music playlist-search results across response variants."""
+    body = (((raw or {}).get("req") or {}).get("data") or {}).get("body") or {}
+    if not isinstance(body, dict):
+        return []
+
+    candidates: list[dict] = []
+    for key in ("songlist", "playlist", "diss", "disslist", "song_list"):
+        value = body.get(key)
+        if isinstance(value, dict):
+            value = value.get("list") or value.get("items") or value.get("data") or []
+        if isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, dict))
+
+    items: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for playlist in candidates:
+        playlist_id = str(
+            playlist.get("dissid")
+            or playlist.get("disstid")
+            or playlist.get("tid")
+            or playlist.get("id")
+            or ""
+        ).strip()
+        if not playlist_id:
+            continue
+        if playlist_id in seen_ids:
+            continue
+        seen_ids.add(playlist_id)
+
+        creator = playlist.get("creator") or playlist.get("owner") or ""
+        if isinstance(creator, dict):
+            creator = creator.get("nick") or creator.get("nickname") or creator.get("name") or ""
+        track_count = (
+            playlist.get("song_count")
+            or playlist.get("songCount")
+            or playlist.get("songnum")
+            or playlist.get("song_num")
+            or ""
+        )
+        cover_url = str(
+            playlist.get("logo")
+            or playlist.get("imgurl")
+            or playlist.get("picurl")
+            or playlist.get("disscover")
+            or playlist.get("diss_cover")
+            or ""
+        ).strip()
+        if cover_url.startswith("//"):
+            cover_url = f"https:{cover_url}"
+        play_count = (
+            playlist.get("listennum")
+            or playlist.get("play_count")
+            or playlist.get("playCount")
+            or ""
+        )
+        items.append(
+            {
+                "id": playlist_id,
+                "name": str(
+                    playlist.get("dissname")
+                    or playlist.get("name")
+                    or playlist.get("title")
+                    or playlist_id
+                ).strip(),
+                "creator": str(creator).strip(),
+                "track_count": str(track_count).strip(),
+                "cover_url": cover_url,
+                "play_count": str(play_count).strip(),
+            }
+        )
+    return items
+
+
+def _extract_qqmusic_playlist_tracks(raw: dict) -> tuple[str, list[dict]]:
+    """Extract a QQ Music playlist name and raw song list."""
+    cdlist = (raw or {}).get("cdlist") or []
+    if isinstance(cdlist, list) and cdlist and isinstance(cdlist[0], dict):
+        playlist = cdlist[0]
+        tracks = playlist.get("songlist") or []
+        return (
+            str(playlist.get("dissname") or playlist.get("name") or "").strip(),
+            [track for track in tracks if isinstance(track, dict)] if isinstance(tracks, list) else [],
+        )
+
+    tracks = (raw or {}).get("songlist") or []
+    return (
+        str((raw or {}).get("dissname") or (raw or {}).get("name") or "").strip(),
+        [track for track in tracks if isinstance(track, dict)] if isinstance(tracks, list) else [],
+    )
+
+
+async def _load_qqmusic_playlist_tracks(playlist_id: str) -> tuple[str, list[dict]]:
+    session = new_session()
+    try:
+        qq_cookie = _get_admin_qqmusic_cookie(session)
+    finally:
+        session.close()
+    qqmusic.set_cookie(qq_cookie)
+    return _extract_qqmusic_playlist_tracks(await qqmusic.get_song_list(playlist_id))
 
 
 def _get_bilibili_download_lock(video_id: str) -> asyncio.Lock:
@@ -2508,7 +2693,15 @@ async def voice_next() -> dict:
         item_id = _shuffle_queue[next_index]
         _current_shuffle_index = next_index
         
-        await _play_queue_item_internal(item_id, requested_by="next")
+        try:
+            await _play_queue_item_internal(item_id, requested_by="next")
+        except HTTPException as exc:
+            detail = str(exc.detail or "").strip()
+            if detail in {"admin netease cookie not set", "网易云功能已禁用"}:
+                await _delete_queue_item(item_id)
+                await _auto_play_next_from_queue(start_after_id=item_id)
+                return {"ok": True, "action": "skipped_legacy_netease"}
+            raise
         return {"ok": True, "action": "play_shuffled_next"}
     else:
         # Regular next behavior - just play next without removing current
@@ -3134,9 +3327,12 @@ def _get_admin_qqmusic_cookie(session: Session) -> str:
     if not row:
         raise HTTPException(status_code=400, detail="admin qqmusic cookie not set")
     try:
-        return decrypt_text(row.value)
+        cookie = decrypt_text(row.value).strip()
     except Exception:
         raise HTTPException(status_code=500, detail="failed to decrypt admin qqmusic cookie")
+    if not cookie:
+        raise HTTPException(status_code=400, detail="admin qqmusic cookie not set")
+    return cookie
 
 
 def _get_admin_bilibili_cookie(session: Session) -> str:
@@ -3165,16 +3361,13 @@ def _format_help() -> str:
         "帮助|help - show this help",
         "状态|now - show now playing",
     ]
-    if settings.enable_netease:
-        lines.extend([
-            "搜索|search <keywords> - search songs",
-            "增加|add <song_id|keywords> - add to queue",
-            "播放|play [song_id|keywords] - play now; no argument plays the first queue item",
-            "歌单|playlist <keywords> - search Netease playlists",
-            "选择|select <number> - add a playlist from the last playlist search",
-        ])
-    else:
-        lines.append("搜索/增加/播放（带关键词）/歌单功能已关闭，请使用 Web 端的 QQ 音乐或 B 站搜索")
+    lines.extend([
+        "搜索|search <keywords> - search QQ Music songs",
+        "增加|add <song_mid|keywords> - add a QQ Music song to the queue",
+        "播放|play [song_mid|keywords] - play a QQ Music song; no argument plays the first queue item",
+        "歌单|playlist <keywords> - search QQ Music playlists",
+        "选择|select <number> - add a playlist from the last QQ Music playlist search",
+    ])
     lines.extend([
         "队列|queue - show queue",
         "清空|clear - clear the current queue",
@@ -3187,10 +3380,18 @@ def _format_help() -> str:
     return "\n".join(lines)
 
 
-def _try_parse_song_id(s: str) -> str | None:
-    t = (s or "").strip()
-    if t.isdigit():
-        return t
+def _try_parse_qqmusic_song_mid(s: str) -> str | None:
+    token = (s or "").strip()
+    explicit_mid = False
+    for prefix in ("mid:", "songmid:"):
+        if token.lower().startswith(prefix):
+            token = token[len(prefix) :].strip()
+            explicit_mid = True
+            break
+    if explicit_mid and re.fullmatch(r"[A-Za-z0-9]{6,64}", token):
+        return token
+    if re.fullmatch(r"(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{6,64}", token):
+        return token
     return None
 
 
@@ -3420,6 +3621,8 @@ async def _enqueue_qqmusic_song(
     requested_by: str,
     quality: str = "320",
     album_mid: str = "",
+    album: str = "",
+    artwork_url: str = "",
     duration_ms: int | None = None,
 ) -> tuple[int, bool]:
     """Enqueue a QQ Music song"""
@@ -3429,13 +3632,20 @@ async def _enqueue_qqmusic_song(
         cookie = _get_admin_qqmusic_cookie(session)
         qqmusic.set_cookie(cookie)
 
-        # Get music URL from QQ Music
-        url = await qqmusic.get_music_url_simple(song_mid, quality)
-        if not url:
-            raise HTTPException(status_code=404, detail="无法获取 QQ 音乐播放链接，可能需要 VIP 会员或该歌曲不可用")
+        normalized_quality = _normalize_qqmusic_quality(quality)
+        url = ""
+        if play_now:
+            # Queued QQ Music items obtain a fresh URL just before playback;
+            # immediate playback needs one now.
+            url = await qqmusic.get_music_url_simple(song_mid, normalized_quality)
+            if not url:
+                raise HTTPException(status_code=404, detail="无法获取 QQ 音乐播放链接，可能需要 VIP 会员或该歌曲不可用")
         
-        # Get song cover using album MID
-        album_cover_url = qqmusic.get_song_cover_image(album_mid) if album_mid else ""
+        # Prefer metadata supplied by the search result; derive a cover when
+        # only the album MID is available.
+        album_cover_url = str(artwork_url or "").strip()
+        if not album_cover_url and album_mid:
+            album_cover_url = qqmusic.get_song_cover_image(album_mid)
         resolved_duration_ms = int(duration_ms) if duration_ms is not None and int(duration_ms) > 0 else 0
         
         # Create queue item
@@ -3443,10 +3653,10 @@ async def _enqueue_qqmusic_song(
             track_id=f"qqmusic:{song_mid}",
             title=title,
             artist=artist,
-            album="",  # QQ Music doesn't provide album info in basic API
+            album=album,
             duration=resolved_duration_ms,
             cover_url=album_cover_url,
-            source_url=url,
+            source_url=_encode_qqmusic_queue_source(normalized_quality, url),
         )
         session.add(item)
         session.commit()
@@ -3459,7 +3669,7 @@ async def _enqueue_qqmusic_song(
                 url,
                 duration_ms=resolved_duration_ms,
                 artist=artist,
-                album="",
+                album=album,
                 artwork_url=album_cover_url,
             )
             await voice.play(source_url=url, title=title, requested_by=requested_by, notice="")
@@ -3467,7 +3677,7 @@ async def _enqueue_qqmusic_song(
                 track_id=item.track_id,
                 title=title,
                 artist=artist,
-                album="",
+                album=album,
                 duration=resolved_duration_ms,
                 cover_url=album_cover_url,
                 source_url=url,
@@ -3783,14 +3993,13 @@ async def _handle_chat_command(
             return
 
         if cmd == "playlist":
-            _require_netease_enabled()
             if not arg:
                 await reply("用法: playlist <歌单关键词>")
                 return
-            raw = await netease.search(keywords=arg, limit=5, type_=1000)
-            playlists = _extract_playlist_search_items(raw)
+            raw = await qqmusic.search_with_keyword(arg, search_type=3, result_num=5, page_num=1)
+            playlists = _extract_qqmusic_playlist_search_items(raw)
             if not playlists:
-                await reply("没有找到网易云歌单")
+                await reply("没有找到 QQ 音乐歌单")
                 return
             _remember_ts_playlist_results(invoker_key, playlists)
             lines: list[str] = []
@@ -3804,11 +4013,10 @@ async def _handle_chat_command(
                 if track_count:
                     suffix += f" ({track_count}首)"
                 lines.append(f"{index}. {detail}{suffix} [id={playlist['id']}]")
-            await reply("网易云歌单搜索结果（使用 select <编号> 加入队列）：\n" + "\n".join(lines))
+            await reply("QQ 音乐歌单搜索结果（使用 select <编号> 加入队列）：\n" + "\n".join(lines))
             return
 
         if cmd == "select":
-            _require_netease_enabled()
             if not arg:
                 await reply("用法: select <歌单编号>")
                 return
@@ -3831,31 +4039,28 @@ async def _handle_chat_command(
                 return
             playlist_id = selected_playlist["id"]
 
-            cookie = _get_admin_cookie_or_none()
-            detail = await netease.playlist_detail(playlist_id=playlist_id, cookie=cookie)
-            playlist_name, tracks = await _load_netease_playlist_tracks(detail, cookie=cookie)
-            if not tracks:
-                await reply("歌单为空，或网易云未返回可用歌曲")
+            playlist_name, tracks = await _load_qqmusic_playlist_tracks(playlist_id)
+            normalized_tracks = [_normalize_qqmusic_song(track) for track in tracks]
+            normalized_tracks = [track for track in normalized_tracks if track is not None]
+            if not normalized_tracks:
+                await reply("歌单为空，或 QQ 音乐未返回可用歌曲")
                 return
 
             added = 0
             failed = 0
-            for track in tracks:
-                normalized = _normalize_netease_song(track)
-                if normalized is None:
-                    failed += 1
-                    continue
+            for normalized in normalized_tracks:
                 try:
-                    await _enqueue_netease_song(
-                        song_id=str(normalized["song_id"]),
+                    await _enqueue_qqmusic_song(
+                        song_mid=str(normalized["song_mid"]),
                         title=str(normalized["title"]),
                         artist=str(normalized["artist"]),
                         play_now=False,
                         requested_by=invoker_name,
+                        quality="320",
+                        album_mid=str(normalized.get("album_mid") or ""),
                         album=str(normalized.get("album") or ""),
-                        duration_ms=normalized.get("duration_ms"),
                         artwork_url=str(normalized.get("artwork_url") or ""),
-                        quality_level="auto",
+                        duration_ms=normalized.get("duration_ms"),
                     )
                     added += 1
                 except Exception:
@@ -4029,22 +4234,21 @@ async def _handle_chat_command(
             return
 
         if cmd == "search":
-            _require_netease_enabled()
             if not arg:
                 await reply("用法: search <关键词>")
                 return
-            raw = await netease.search(keywords=arg, limit=5)
-            songs = (((raw or {}).get("result") or {}).get("songs") or [])
+            songs = _normalize_qqmusic_search_items(
+                await qqmusic.search_songs_simple(arg, limit=5, page=1)
+            )
             if not songs:
-                await reply("没有找到结果")
+                await reply("没有找到 QQ 音乐结果")
                 return
             lines: list[str] = []
-            for i, s in enumerate(songs[:5], start=1):
-                sid = str((s or {}).get("id") or "")
-                title = str((s or {}).get("name") or "")
-                artist = _extract_netease_artist_names(s or {}) if isinstance(s, dict) else ""
-                lines.append(f"{i}. {sid} {title} - {artist}".strip())
-            await reply("搜索结果(可直接用 add/play + 歌曲ID):\n" + "\n".join(lines))
+            for i, song in enumerate(songs[:5], start=1):
+                lines.append(
+                    f"{i}. {song['song_mid']} {song['title']} - {song['artist']}".strip(" -")
+                )
+            await reply("QQ 音乐搜索结果（可直接用 add/play + song_mid）：\n" + "\n".join(lines))
             return
 
         if cmd == "play" and not arg:
@@ -4076,42 +4280,45 @@ async def _handle_chat_command(
 
         if cmd in ("add", "play"):
             if not arg:
-                await reply(f"用法: {cmd} <歌曲ID|关键词>")
+                await reply(f"用法: {cmd} <song_mid|关键词>")
                 return
-            _require_netease_enabled()
-
-            song_id = _try_parse_song_id(arg)
+            song_mid = _try_parse_qqmusic_song_mid(arg)
             title = ""
             artist = ""
+            album = ""
+            album_mid = ""
+            artwork_url = ""
+            duration_ms: int | None = None
 
-            if song_id is None:
-                raw = await netease.search(keywords=arg, limit=1)
-                meta = _extract_song_meta_from_search_first(raw)
-                if meta is None:
-                    await reply("没有找到结果")
+            if song_mid is None:
+                songs = _normalize_qqmusic_search_items(
+                    await qqmusic.search_songs_simple(arg, limit=1, page=1)
+                )
+                if not songs:
+                    await reply("没有找到 QQ 音乐结果")
                     return
-                song_id, title, artist = meta
+                first = songs[0]
+                song_mid = str(first["song_mid"])
+                title = str(first.get("title") or song_mid)
+                artist = str(first.get("artist") or "")
+                album = str(first.get("album") or "")
+                album_mid = str(first.get("album_mid") or "")
+                artwork_url = str(first.get("artwork_url") or "")
+                duration_ms = first.get("duration_ms")
             else:
-                # Use admin cookie for detail lookup.
-                session = new_session()
-                try:
-                    cookie = _get_admin_cookie(session)
-                finally:
-                    session.close()
-                detail = await netease.song_detail(song_id=song_id, cookie=cookie)
-                meta2 = _extract_song_meta_from_detail(detail, song_id)
-                if meta2 is not None:
-                    title, artist = meta2
-                else:
-                    title = song_id
+                title = song_mid
 
-            item_id, trial = await _enqueue_netease_song(
-                song_id=song_id,
+            item_id, trial = await _enqueue_qqmusic_song(
+                song_mid=song_mid,
                 title=title,
                 artist=artist,
                 play_now=(cmd == "play"),
                 requested_by=invoker_name,
-                quality_level="auto",
+                quality="320",
+                album_mid=album_mid,
+                album=album,
+                artwork_url=artwork_url,
+                duration_ms=duration_ms,
             )
             song_label = f"{title} - {artist}".strip(" -")
             extra = ""
@@ -4144,6 +4351,12 @@ async def _handle_chat_command(
         detail = str(getattr(e, "detail", "") or "").strip()
         if detail == "网易云功能已禁用":
             await reply("网易云功能已禁用，请使用 Web 端的 QQ 音乐或 B 站搜索")
+            return
+        if detail == "admin qqmusic cookie not set":
+            await reply("QQ 音乐后台授权未配置，请在 Web 控制台“系统设置 → 音乐会员登录”中完成 QQ 音乐后台授权")
+            return
+        if detail == "failed to decrypt admin qqmusic cookie":
+            await reply("QQ 音乐后台授权无法解密，请检查 TSBOT_COOKIE_KEY 是否与保存授权时一致")
             return
         if e.status_code == 404:
             await reply("加载失败：歌曲不存在/已下架（无版权或资源不可用）")
@@ -4750,6 +4963,8 @@ async def add_queue_qqmusic(req: AddQQMusicQueueRequest) -> dict:
             requested_by="web",
             quality=req.quality,
             album_mid=req.album_mid,
+            album=req.album,
+            artwork_url=req.cover_url,
             duration_ms=req.duration_ms,
         )
         return {"ok": True, "id": item_id, "trial": trial}
@@ -4924,6 +5139,8 @@ async def _replay_history_item(
             requested_by=requested_by,
             quality="320",
             album_mid="",
+            album=str(hist_item.album or ""),
+            artwork_url=str(hist_item.cover_url or ""),
             duration_ms=hist_item.duration,
         )
         return {
@@ -5016,7 +5233,7 @@ async def external_set_player_repeat(req: RepeatRequest) -> dict:
 @app.get("/external/search", tags=["External API"])
 async def external_search(
     keywords: str,
-    source: str = "netease",
+    source: str = "qqmusic",
     limit: int = 20,
     page: int = 1,
 ) -> dict:
@@ -5024,7 +5241,7 @@ async def external_search(
     if not query:
         raise HTTPException(status_code=400, detail="keywords is empty")
 
-    provider = (source or "netease").strip().lower()
+    provider = (str(source or "").strip().lower() or "qqmusic")
     page = max(1, int(page))
     limit = max(1, min(int(limit), 50))
 
@@ -5067,7 +5284,7 @@ async def external_search(
 
 @app.post("/external/queue", tags=["External API"])
 async def external_add_queue(req: ExternalQueueRequest) -> dict:
-    provider = (req.source or "netease").strip().lower()
+    provider = (str(req.source or "").strip().lower() or "qqmusic")
     keywords = (req.keywords or "").strip()
     play_now = bool(req.play_now)
 
@@ -5233,7 +5450,7 @@ async def external_add_queue(req: ExternalQueueRequest) -> dict:
         if not song_mid:
             raise HTTPException(status_code=400, detail="song_mid is empty")
         if not title:
-            raise HTTPException(status_code=400, detail="title is required for qqmusic")
+            title = song_mid
         if not cover_url and album_mid:
             cover_url = qqmusic.get_song_cover_image(album_mid)
 
@@ -5245,6 +5462,8 @@ async def external_add_queue(req: ExternalQueueRequest) -> dict:
             requested_by="external_api",
             quality=quality,
             album_mid=album_mid,
+            album=album,
+            artwork_url=cover_url,
             duration_ms=duration_ms,
         )
         return {
@@ -5479,6 +5698,33 @@ async def qqmusic_search_songs(keywords: str, limit: int = 50, page: int = 1) ->
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/qqmusic/search/playlists")
+async def qqmusic_search_playlists(keywords: str, limit: int = 30, page: int = 1) -> dict:
+    """QQ 音乐歌单搜索（返回稳定的前端结构）。"""
+    query = (keywords or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="keywords is empty")
+    try:
+        raw = await qqmusic.search_with_keyword(
+            query,
+            search_type=3,
+            result_num=max(1, min(int(limit), 50)),
+            page_num=max(1, int(page)),
+        )
+        items = _extract_qqmusic_playlist_search_items(raw)
+        return {
+            "keywords": query,
+            "page": max(1, int(page)),
+            "limit": max(1, min(int(limit), 50)),
+            "has_more": len(items) >= max(1, min(int(limit), 50)),
+            "playlists": items,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/qqmusic/song/{song_mid}/url")
 async def qqmusic_song_url(song_mid: str, quality: str = "320") -> dict:
     """获取QQ音乐播放URL"""
@@ -5618,8 +5864,11 @@ class QQMusicQRConfirmRequest(BaseModel):
 @app.get("/admin/qqmusic/status")
 async def admin_qqmusic_status(request: Request, session: Session = Depends(get_session)) -> dict:
     _require_admin_token(request)
-    row = session.get(Secret, "qqmusic_cookie")
-    return {"admin_cookie_set": bool(row and row.value)}
+    try:
+        _get_admin_qqmusic_cookie(session)
+    except HTTPException:
+        return {"admin_cookie_set": False}
+    return {"admin_cookie_set": True}
 
 
 @app.post("/admin/qqmusic/cookie")
@@ -5650,7 +5899,7 @@ async def admin_qqmusic_qr_confirm(
     _require_admin_token(request)
     r = await qqmusic.confirm_qr_login(req.auth_url)
     c = (qqmusic.get_cookie() or "").strip()
-    print(f"[DEBUG] QR confirm - new cookie length: {len(c)}, preview: {c[:200]}...")
+    print(f"[DEBUG] QR confirm - received cookie length: {len(c)}")
     if c:
         _set_secret(session, "qqmusic_cookie", c)
         print(f"[DEBUG] QR confirm - cookie saved to database")
