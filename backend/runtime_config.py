@@ -41,6 +41,7 @@ class SettingDefinition:
 DEFINITIONS: tuple[SettingDefinition, ...] = (
     SettingDefinition("web.app_name", "web", "界面名称", env="TSBOT_WEB_APP_NAME", default="Yumi TSBot", backend_attr="web_app_name"),
     SettingDefinition("web.log_level", "web", "Web 日志等级", type="select", env="VITE_LOG_LEVEL", default="INFO", options=("DEBUG", "INFO", "WARN", "ERROR"), backend_attr="web_log_level"),
+    SettingDefinition("backend.enable_netease", "music", "启用网易云功能", type="boolean", env="TSBOT_ENABLE_NETEASE", default=False, backend_attr="enable_netease"),
     SettingDefinition("backend.netease_api_base", "music", "网易云 API 地址", type="url", env="TSBOT_NETEASE_API_BASE", default="http://127.0.0.1:3000/", backend_attr="netease_api_base"),
     SettingDefinition("backend.voice_grpc_addr", "backend", "Voice gRPC 地址", env="TSBOT_VOICE_GRPC_ADDR", default="127.0.0.1:50051", backend_attr="voice_grpc_addr"),
     SettingDefinition("backend.log_level", "backend", "后端日志等级", type="select", env="TSBOT_LOG_LEVEL", default="INFO", options=("DEBUG", "INFO", "WARNING", "ERROR"), backend_attr="log_level"),
@@ -61,7 +62,7 @@ DEFINITIONS: tuple[SettingDefinition, ...] = (
     SettingDefinition("voice.ts3_identity", "teamspeak", "Identity 内容", type="secret", env="TSBOT_TS3_IDENTITY", sensitive=True, restart="voice"),
     SettingDefinition("voice.allow_direct_description", "teamspeak", "允许直接更新客户端简介", type="boolean", env="TSBOT_TS3_ALLOW_DIRECT_CLIENTUPDATE_DESCRIPTION", default=False, restart="voice"),
     SettingDefinition("voice.description_title", "teamspeak", "客户端简介标题", type="multiline", env="TSBOT_TS3_CLIENT_DESCRIPTION_TITLE", default="Yumi TSBot", restart="voice", backend_attr="voice_description_title"),
-    SettingDefinition("voice.description_intro", "teamspeak", "客户端简介正文", type="multiline", env="TSBOT_TS3_CLIENT_DESCRIPTION_INTRO", default="TeamSpeak 音乐机器人\\n支持网易云 / QQ 音乐 / B站", restart="voice", backend_attr="voice_description_intro"),
+    SettingDefinition("voice.description_intro", "teamspeak", "客户端简介正文", type="multiline", env="TSBOT_TS3_CLIENT_DESCRIPTION_INTRO", default="TeamSpeak 音乐机器人\\n支持 QQ 音乐 / B站", restart="voice", backend_attr="voice_description_intro"),
     SettingDefinition("voice.serverquery_user", "serverquery", "ServerQuery 用户名", env="TSBOT_TS3_SERVERQUERY_USER", restart="voice"),
     SettingDefinition("voice.serverquery_password", "serverquery", "ServerQuery 密码", type="password", env="TSBOT_TS3_SERVERQUERY_PASSWORD", sensitive=True, restart="voice"),
     SettingDefinition("voice.serverquery_host", "serverquery", "ServerQuery 主机", env="TSBOT_TS3_SERVERQUERY_HOST", restart="voice"),

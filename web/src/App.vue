@@ -103,6 +103,7 @@ function toggleTheme() {
                 to="/playlists" 
                 class="nav-item"
                 active-class="nav-item-active"
+                v-if="appConfig.neteaseEnabled"
               >
                 <ListMusic :size="20" />
                 <span>歌单广场</span>
@@ -125,6 +126,7 @@ function toggleTheme() {
                 to="/likes" 
                 class="nav-item"
                 active-class="nav-item-active"
+                v-if="appConfig.neteaseEnabled"
               >
                 <Heart :size="20" />
                 <span>我喜欢的</span>

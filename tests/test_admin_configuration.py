@@ -184,6 +184,11 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertEqual("backend", fields["voice.log_level"]["group"])
         self.assertEqual("backend", fields["voice.state_file"]["group"])
 
+    def test_netease_feature_is_disabled_by_default(self) -> None:
+        definition = DEFINITION_BY_KEY["backend.enable_netease"]
+        self.assertFalse(definition.default)
+        self.assertFalse(get_value(self.session, definition))
+
     def test_managed_asset_upload_uses_fixed_path_and_validates_signature(self) -> None:
         icon = ASSET_BY_KEY["web-app-icon"]
         avatar = ASSET_BY_KEY["teamspeak-avatar"]

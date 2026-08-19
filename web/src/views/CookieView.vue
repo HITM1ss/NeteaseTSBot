@@ -8,7 +8,7 @@
           系统设置
         </h1>
         <span class="text-sm text-gray-500 hidden md:inline-block border-l border-gray-200 pl-4 h-5 leading-5">
-          管理您的网易云、QQ音乐、B站登录状态和系统配置
+          管理您的{{ appConfig.neteaseEnabled ? '网易云、' : '' }}QQ音乐、B站登录状态和系统配置
         </span>
       </div>
     </div>
@@ -25,7 +25,7 @@
         </div>
 
         <!-- User Login Section -->
-        <section class="theme-settings-panel bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
+        <section v-if="appConfig.neteaseEnabled" class="theme-settings-panel bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
           <div v-if="!embedded" class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
             <User :size="200" class="text-black" />
           </div>
@@ -95,7 +95,7 @@
         </section>
 
         <!-- Admin Login Section -->
-        <section class="theme-settings-panel bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
+        <section v-if="appConfig.neteaseEnabled" class="theme-settings-panel bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
           <div v-if="!embedded" class="absolute top-0 right-0 p-6 opacity-[0.03] pointer-events-none">
             <Shield :size="200" class="text-black" />
           </div>
@@ -369,6 +369,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { apiGet, apiPost } from '../api'
+import { appConfig } from '../appConfig'
 import { 
   Settings, 
   Info, 
@@ -427,8 +428,16 @@ function getAdminHeaders(): Record<string, string> {
 async function load() {
   status.value = ''
   userCookie.value = localStorage.getItem(USER_COOKIE_KEY) || ''
-  const st = await apiGet<{ admin_cookie_set: boolean }>('/admin/status')
-  adminStatus.value = !!st?.admin_cookie_set
+  if (appConfig.neteaseEnabled) {
+    try {
+      const st = await apiGet<{ admin_cookie_set: boolean }>('/admin/status')
+      adminStatus.value = !!st?.admin_cookie_set
+    } catch {
+      adminStatus.value = false
+    }
+  } else {
+    adminStatus.value = false
+  }
 
   try {
     const qst = await apiGet<{ admin_cookie_set: boolean }>('/admin/qqmusic/status', getAdminHeaders())
@@ -450,6 +459,7 @@ async function load() {
 }
 
 async function setAdminCookie() {
+  if (!appConfig.neteaseEnabled) return
   status.value = ''
   try {
     const cookie = adminManualCookie.value
@@ -650,6 +660,7 @@ function stopBilibiliAdminPoll() {
 }
 
 async function startUserQr() {
+  if (!appConfig.neteaseEnabled) return
   status.value = ''
   try {
     stopUserPoll()
@@ -670,6 +681,10 @@ async function startUserQr() {
 }
 
 async function checkUserQr() {
+  if (!appConfig.neteaseEnabled) {
+    stopUserPoll()
+    return
+  }
   status.value = ''
   try {
     if (!userQrKey.value) return
@@ -704,6 +719,7 @@ async function checkUserQr() {
 }
 
 async function startAdminQr() {
+  if (!appConfig.neteaseEnabled) return
   status.value = ''
   try {
     stopAdminPoll()
@@ -725,6 +741,10 @@ async function startAdminQr() {
 }
 
 async function checkAdminQr() {
+  if (!appConfig.neteaseEnabled) {
+    stopAdminPoll()
+    return
+  }
   status.value = ''
   try {
     if (!adminQrKey.value) return

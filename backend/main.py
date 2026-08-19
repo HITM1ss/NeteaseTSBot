@@ -77,6 +77,10 @@ netease = NeteaseClient()
 qqmusic = QQMusicClient()
 voice = VoiceClient()
 
+def _require_netease_enabled() -> None:
+    if not settings.enable_netease:
+        raise HTTPException(status_code=404, detail="网易云功能已禁用")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BILIBILI_AUDIO_DIR = REPO_ROOT / "tmp" / "bilibili_audio"
 BILIBILI_AUDIO_CACHE_TTL_SECONDS = max(0, settings.bilibili_audio_cache_ttl_hours) * 3600
@@ -692,6 +696,9 @@ async def _play_queue_item_internal(item_id: int, *, requested_by: str) -> bool:
         source_url = str(item.source_url or "")
         playback_source_url = source_url
         if item.track_id.startswith("netease:"):
+            if not settings.enable_netease:
+                logger.info("skip disabled netease queue item %s", item.id)
+                return False
             cookie = _get_admin_cookie(session)
             song_id = item.track_id.split(":", 1)[1]
             quality_level = _extract_netease_queue_level(source_url)
@@ -2695,6 +2702,7 @@ async def voice_repeat(req: RepeatRequest) -> dict:
 
 @app.get("/search", response_model=SearchResponse)
 async def search(keywords: str, limit: int = 20, offset: int = 0) -> SearchResponse:
+    _require_netease_enabled()
     data = await netease.search(keywords=keywords, limit=limit, offset=offset)
     try:
         songs = (((data or {}).get("result") or {}).get("songs") or [])
@@ -2812,6 +2820,8 @@ async def lyrics(queue_item_id: int) -> LyricsResponse:
         session.close()
 
     if track_id.startswith("netease:"):
+        if not settings.enable_netease:
+            return LyricsResponse(lyrics=[])
         # 网易云音乐歌词
         song_id = track_id.split(":", 1)[1]
         cookie = None
@@ -2861,22 +2871,26 @@ async def lyrics(queue_item_id: int) -> LyricsResponse:
 
 @app.get("/playlist/detail")
 async def playlist_detail(id: str, request: Request) -> dict:
+    _require_netease_enabled()
     cookie = request.headers.get("x-netease-cookie")
     return await netease.playlist_detail(playlist_id=id, cookie=cookie)
 
 
 @app.get("/netease/qr/key")
 async def netease_qr_key() -> dict:
+    _require_netease_enabled()
     return await netease.qr_key()
 
 
 @app.get("/netease/qr/create")
 async def netease_qr_create(key: str) -> dict:
+    _require_netease_enabled()
     return await netease.qr_create(key)
 
 
 @app.get("/netease/qr/check")
 async def netease_qr_check(key: str) -> dict:
+    _require_netease_enabled()
     return await netease.qr_check(key)
 
 
@@ -3043,6 +3057,7 @@ async def _resolve_netease_playback_payload(
 
 @app.get("/netease/song/url")
 async def song_url(id: str, level: str = "auto", session: Session = Depends(get_session)) -> dict:
+    _require_netease_enabled()
     cookie = _get_admin_cookie(session)
     requested_level = _resolve_netease_request_level(level)
     data = await netease.song_url_v1(song_id=id, cookie=cookie, level=requested_level)
@@ -3145,23 +3160,31 @@ def _require_admin_token(request: Request) -> None:
 
 
 def _format_help() -> str:
-    return (
-        "Commands (no prefix):\n"
-        "帮助|help - show this help\n"
-        "状态|now - show now playing\n"
-        "搜索|search <keywords> - search songs\n"
-        "增加|add <song_id|keywords> - add to queue\n"
-        "播放|play [song_id|keywords] - play now; no argument plays the first queue item\n"
-        "队列|queue - show queue\n"
-        "歌单|playlist <keywords> - search Netease playlists\n"
-        "选择|select <number> - add a playlist from the last playlist search\n"
-        "清空|clear - clear the current queue\n"
-        "顺序播放|order / 随机播放|random - switch queue playback mode\n"
-        "暂停|pause / 恢复|resume / 停止|stop / 跳过|skip\n"
-        "音量|vol <0-200> - set volume\n"
-        "音效|fx - show audio fx\n"
-        "fx pan <-1..1> / fx width <0..3> / fx swap <on|off> / fx bass <0..18> / fx reverb <0..1> / fx reset"
-    )
+    lines = [
+        "Commands (no prefix):",
+        "帮助|help - show this help",
+        "状态|now - show now playing",
+    ]
+    if settings.enable_netease:
+        lines.extend([
+            "搜索|search <keywords> - search songs",
+            "增加|add <song_id|keywords> - add to queue",
+            "播放|play [song_id|keywords] - play now; no argument plays the first queue item",
+            "歌单|playlist <keywords> - search Netease playlists",
+            "选择|select <number> - add a playlist from the last playlist search",
+        ])
+    else:
+        lines.append("搜索/增加/播放（带关键词）/歌单功能已关闭，请使用 Web 端的 QQ 音乐或 B 站搜索")
+    lines.extend([
+        "队列|queue - show queue",
+        "清空|clear - clear the current queue",
+        "顺序播放|order / 随机播放|random - switch queue playback mode",
+        "暂停|pause / 恢复|resume / 停止|stop / 跳过|skip",
+        "音量|vol <0-200> - set volume",
+        "音效|fx - show audio fx",
+        "fx pan <-1..1> / fx width <0..3> / fx swap <on|off> / fx bass <0..18> / fx reverb <0..1> / fx reset",
+    ])
+    return "\n".join(lines)
 
 
 def _try_parse_song_id(s: str) -> str | None:
@@ -3760,6 +3783,7 @@ async def _handle_chat_command(
             return
 
         if cmd == "playlist":
+            _require_netease_enabled()
             if not arg:
                 await reply("用法: playlist <歌单关键词>")
                 return
@@ -3784,6 +3808,7 @@ async def _handle_chat_command(
             return
 
         if cmd == "select":
+            _require_netease_enabled()
             if not arg:
                 await reply("用法: select <歌单编号>")
                 return
@@ -4004,6 +4029,7 @@ async def _handle_chat_command(
             return
 
         if cmd == "search":
+            _require_netease_enabled()
             if not arg:
                 await reply("用法: search <关键词>")
                 return
@@ -4052,6 +4078,7 @@ async def _handle_chat_command(
             if not arg:
                 await reply(f"用法: {cmd} <歌曲ID|关键词>")
                 return
+            _require_netease_enabled()
 
             song_id = _try_parse_song_id(arg)
             title = ""
@@ -4115,6 +4142,9 @@ async def _handle_chat_command(
         await reply("unknown command, try !help")
     except HTTPException as e:
         detail = str(getattr(e, "detail", "") or "").strip()
+        if detail == "网易云功能已禁用":
+            await reply("网易云功能已禁用，请使用 Web 端的 QQ 音乐或 B 站搜索")
+            return
         if e.status_code == 404:
             await reply("加载失败：歌曲不存在/已下架（无版权或资源不可用）")
             return
@@ -4226,6 +4256,7 @@ def public_config() -> dict:
         "app_name": settings.web_app_name,
         "app_icon": icon.public_path if asset_path(icon).is_file() else "",
         "log_level": settings.web_log_level,
+        "netease_enabled": bool(settings.enable_netease),
     }
 
 
@@ -4437,6 +4468,7 @@ def admin_delete_asset(
 @app.get("/admin/status")
 def admin_status(request: Request, session: Session = Depends(get_session)) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     row = session.get(Secret, "netease_cookie")
     if not row or not row.value:
         return {"admin_cookie_set": False}
@@ -4450,6 +4482,7 @@ def admin_status(request: Request, session: Session = Depends(get_session)) -> d
 @app.get("/admin/account")
 async def admin_account(request: Request, session: Session = Depends(get_session)) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     cookie = _get_admin_cookie(session)
     data = await netease.user_account(cookie=cookie)
     profile = (data or {}).get("profile") or {}
@@ -4474,6 +4507,7 @@ async def admin_ts_description(req: TSClientDescriptionRequest, request: Request
 @app.get("/admin/debug/cookie")
 async def admin_debug_cookie(request: Request, session: Session = Depends(get_session)) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     cookie = _get_admin_cookie(session)
     return {"fingerprint": _cookie_fingerprint(cookie)}
 
@@ -4481,6 +4515,7 @@ async def admin_debug_cookie(request: Request, session: Session = Depends(get_se
 @app.get("/admin/debug/config")
 async def admin_debug_config(request: Request) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     return {
         "cookie_key_fingerprint": _cookie_key_fingerprint(),
         "netease_api_base": settings.netease_api_base,
@@ -4501,6 +4536,7 @@ async def admin_debug_runtime(request: Request) -> dict:
 @app.get("/admin/debug/song_url")
 async def admin_debug_song_url(request: Request, id: str, level: str = "auto", session: Session = Depends(get_session)) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     cookie = _get_admin_cookie(session)
 
     detail = await netease.song_detail(song_id=id, cookie=cookie)
@@ -4545,6 +4581,7 @@ def admin_set_cookie(
     session: Session = Depends(get_session),
 ) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     c = (req.cookie or "").strip()
     if not c:
         raise HTTPException(status_code=400, detail="cookie is empty")
@@ -4560,18 +4597,21 @@ def admin_set_cookie(
 @app.get("/admin/qr/key")
 async def admin_qr_key(request: Request) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     return await netease.qr_key()
 
 
 @app.get("/admin/qr/create")
 async def admin_qr_create(key: str, request: Request) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     return await netease.qr_create(key)
 
 
 @app.get("/admin/qr/check")
 async def admin_qr_check(key: str, request: Request, session: Session = Depends(get_session)) -> dict:
     _require_admin_token(request)
+    _require_netease_enabled()
     data = await netease.qr_check(key)
     code = (data or {}).get("code")
     if code == 803:
@@ -4595,12 +4635,14 @@ async def admin_qr_check(key: str, request: Request, session: Session = Depends(
 
 @app.get("/netease/account")
 async def netease_account(request: Request) -> dict:
+    _require_netease_enabled()
     cookie = _get_netease_cookie_from_header(request)
     return await netease.user_account(cookie=cookie)
 
 
 @app.get("/netease/likelist")
 async def netease_likelist(request: Request, offset: int = 0, limit: int = 0) -> dict:
+    _require_netease_enabled()
     cookie = _get_netease_cookie_from_header(request)
     account = await netease.user_account(cookie=cookie)
     profile = (account or {}).get("profile") or {}
@@ -4664,6 +4706,7 @@ async def netease_likes(request: Request, offset: int = 0, limit: int = 0) -> di
 
 @app.get("/netease/playlists")
 async def netease_playlists(request: Request) -> dict:
+    _require_netease_enabled()
     cookie = _get_netease_cookie_from_header(request)
     account = await netease.user_account(cookie=cookie)
     profile = (account or {}).get("profile") or {}
@@ -4675,6 +4718,7 @@ async def netease_playlists(request: Request) -> dict:
 
 @app.post("/queue/netease")
 async def add_queue_netease(req: AddNeteaseQueueRequest) -> dict:
+    _require_netease_enabled()
     try:
         item_id, trial = await _enqueue_netease_song(
             song_id=req.song_id,
@@ -4808,6 +4852,7 @@ async def _replay_history_item(
         raise HTTPException(status_code=400, detail="history track_id is empty")
 
     if track_id.startswith("netease:"):
+        _require_netease_enabled()
         song_id = track_id.split(":", 1)[1].strip()
         if not song_id:
             raise HTTPException(status_code=400, detail="netease song_id is empty")
@@ -4983,6 +5028,9 @@ async def external_search(
     page = max(1, int(page))
     limit = max(1, min(int(limit), 50))
 
+    if provider == "netease":
+        _require_netease_enabled()
+
     if provider == "bilibili":
         return await _bilibili_search_videos(keywords=query, limit=limit, page=page)
 
@@ -5024,6 +5072,7 @@ async def external_add_queue(req: ExternalQueueRequest) -> dict:
     play_now = bool(req.play_now)
 
     if provider == "netease":
+        _require_netease_enabled()
         song_id = (req.song_id or "").strip()
         title = (req.title or "").strip()
         artist = (req.artist or "").strip()
@@ -5265,6 +5314,7 @@ async def external_replay_history(
 @app.get("/netease/search/suggest")
 async def netease_search_suggest(keywords: str) -> dict:
     """搜索建议"""
+    _require_netease_enabled()
     try:
         result = await netease.search_suggest(keywords)
         return result
@@ -5275,6 +5325,7 @@ async def netease_search_suggest(keywords: str) -> dict:
 @app.get("/netease/search/hot")
 async def netease_search_hot() -> dict:
     """热搜列表"""
+    _require_netease_enabled()
     try:
         result = await netease.search_hot()
         return result
@@ -5285,6 +5336,7 @@ async def netease_search_hot() -> dict:
 @app.get("/netease/search/default")
 async def netease_search_default() -> dict:
     """默认搜索关键词"""
+    _require_netease_enabled()
     try:
         result = await netease.search_default()
         return result
@@ -5295,6 +5347,7 @@ async def netease_search_default() -> dict:
 @app.get("/netease/playlist/categories")
 async def netease_playlist_categories() -> dict:
     """歌单分类"""
+    _require_netease_enabled()
     try:
         result = await netease.playlist_catlist()
         return result
@@ -5305,6 +5358,7 @@ async def netease_playlist_categories() -> dict:
 @app.get("/netease/playlist/hot")
 async def netease_playlist_hot_categories() -> dict:
     """热门歌单分类"""
+    _require_netease_enabled()
     try:
         result = await netease.playlist_hot()
         return result
@@ -5315,6 +5369,7 @@ async def netease_playlist_hot_categories() -> dict:
 @app.get("/netease/playlist/top")
 async def netease_top_playlists(cat: str = "全部", limit: int = 50, offset: int = 0) -> dict:
     """网友精选歌单"""
+    _require_netease_enabled()
     try:
         result = await netease.top_playlist(cat=cat, limit=limit, offset=offset)
         return result
@@ -5325,6 +5380,7 @@ async def netease_top_playlists(cat: str = "全部", limit: int = 50, offset: in
 @app.get("/netease/playlist/highquality")
 async def netease_highquality_playlists(cat: str = "全部", limit: int = 20) -> dict:
     """精品歌单"""
+    _require_netease_enabled()
     try:
         result = await netease.top_playlist_highquality(cat=cat, limit=limit)
         return result
@@ -5335,6 +5391,7 @@ async def netease_highquality_playlists(cat: str = "全部", limit: int = 20) ->
 @app.get("/netease/playlist/{playlist_id}/detail")
 async def netease_playlist_detail(playlist_id: str) -> dict:
     """歌单详情"""
+    _require_netease_enabled()
     try:
         cookie = _get_admin_cookie_or_none()
         result = await netease.playlist_detail(playlist_id, cookie=cookie)
@@ -5346,6 +5403,7 @@ async def netease_playlist_detail(playlist_id: str) -> dict:
 @app.get("/netease/song/{song_id}/lyric")
 async def netease_song_lyric(song_id: str) -> dict:
     """获取歌词"""
+    _require_netease_enabled()
     try:
         cookie = _get_admin_cookie_or_none()
         result = await netease.lyric(song_id, cookie=cookie)
@@ -5357,6 +5415,7 @@ async def netease_song_lyric(song_id: str) -> dict:
 @app.get("/netease/recommend/playlists")
 async def netease_recommend_playlists(limit: int = 30) -> dict:
     """推荐歌单"""
+    _require_netease_enabled()
     try:
         cookie = _get_admin_cookie_or_none()
         result = await netease.personalized(limit=limit, cookie=cookie)

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { apiGet, apiPost } from '../api'
+import { appConfig } from '../appConfig'
 import { 
   Search, 
   Play, 
@@ -34,7 +35,7 @@ const hotSearches = ref<any[]>([])
 const showSuggestions = ref(false)
 const isSearchFocused = ref(false)
 const defaultKeyword = ref('')
-const selectedPlatform = ref<'netease' | 'qqmusic' | 'bilibili'>('netease')
+const selectedPlatform = ref<'netease' | 'qqmusic' | 'bilibili'>(appConfig.neteaseEnabled ? 'netease' : 'qqmusic')
 const qqMusicConfigured = ref(false)
 const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
@@ -108,6 +109,9 @@ function clearSearchHistory() {
 }
 
 async function search(isLoadMore = false) {
+  if (!appConfig.neteaseEnabled && selectedPlatform.value === 'netease') {
+    selectedPlatform.value = 'qqmusic'
+  }
   if (!keywords.value.trim()) return
   
   if (!isLoadMore) {
@@ -183,7 +187,7 @@ async function loadMore() {
 }
 
 async function getSuggestions() {
-  if (selectedPlatform.value !== 'netease') {
+  if (!appConfig.neteaseEnabled || selectedPlatform.value !== 'netease') {
     suggestions.value = []
     showSuggestions.value = false
     return
@@ -207,6 +211,10 @@ async function getSuggestions() {
 }
 
 async function loadHotSearches() {
+  if (!appConfig.neteaseEnabled) {
+    hotSearches.value = []
+    return
+  }
   try {
     const res = await apiGet<any>('/netease/search/hot')
     hotSearches.value = res?.result?.hots || []
@@ -216,6 +224,10 @@ async function loadHotSearches() {
 }
 
 async function loadDefaultKeyword() {
+  if (!appConfig.neteaseEnabled) {
+    defaultKeyword.value = ''
+    return
+  }
   try {
     const res = await apiGet<any>('/netease/search/default')
     defaultKeyword.value = res?.data?.showKeyword || res?.data?.realkeyword || ''
@@ -267,6 +279,9 @@ async function enqueue(song: any, playNow: boolean) {
       })
       status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
     } else {
+      if (!appConfig.neteaseEnabled) {
+        throw new Error('网易云功能已禁用')
+      }
       const res = await apiPost<{ ok: boolean; id: number; source_url: string }>('/queue/netease', {
         ...buildNeteaseQueuePayload(song, playNow),
       })
@@ -482,8 +497,15 @@ function handleBlur() {
   }, 200)
 }
 
-// 页面加载时初始化
-import { onMounted } from 'vue'
+watch(() => appConfig.neteaseEnabled, (enabled) => {
+  if (!enabled && selectedPlatform.value === 'netease') {
+    selectedPlatform.value = 'qqmusic'
+    songs.value = []
+    suggestions.value = []
+    hotSearches.value = []
+    defaultKeyword.value = ''
+  }
+})
 
 onMounted(() => {
   loadHotSearches()
@@ -509,6 +531,7 @@ onMounted(() => {
           <span class="text-sm font-medium text-gray-700">媒体平台:</span>
           <div class="flex bg-gray-100 rounded-lg p-1">
             <button
+              v-if="appConfig.neteaseEnabled"
               @click="selectedPlatform = 'netease'"
               :class="[
                 'px-3 py-1.5 text-sm font-medium rounded-md transition-all duration-200',

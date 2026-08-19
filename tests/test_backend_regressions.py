@@ -83,6 +83,13 @@ class BilibiliAudioCacheTests(unittest.TestCase):
 
 
 class AdminCookieStatusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.netease_enabled = patch.object(main.settings, "enable_netease", True)
+        self.netease_enabled.start()
+
+    def tearDown(self) -> None:
+        self.netease_enabled.stop()
+
     def test_encrypted_empty_cookie_is_not_reported_as_configured(self) -> None:
         session = unittest.mock.Mock()
         session.get.return_value = unittest.mock.Mock(value="encrypted-empty-cookie")
@@ -137,6 +144,13 @@ class AdminCookieStatusTests(unittest.TestCase):
 
 
 class NeteaseQrCookieTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.netease_enabled = patch.object(main.settings, "enable_netease", True)
+        self.netease_enabled.start()
+
+    def tearDown(self) -> None:
+        self.netease_enabled.stop()
+
     async def test_qr_success_without_core_auth_cookie_is_rejected(self) -> None:
         qr_response = {
             "code": 803,
@@ -178,9 +192,31 @@ class NeteaseQrCookieTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class NeteaseFeatureFlagTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_is_rejected_without_calling_netease_client_when_disabled(self) -> None:
+        with (
+            patch.object(main.settings, "enable_netease", False),
+            patch.object(main.netease, "search", AsyncMock()) as search,
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await main.search("测试")
+
+        self.assertEqual(404, raised.exception.status_code)
+        search.assert_not_awaited()
+
+    def test_public_config_exposes_netease_feature_flag(self) -> None:
+        with patch.object(main.settings, "enable_netease", False):
+            self.assertFalse(main.public_config()["netease_enabled"])
+
+
 class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main._ts_playlist_results.clear()
+        self.netease_enabled = patch.object(main.settings, "enable_netease", True)
+        self.netease_enabled.start()
+
+    def tearDown(self) -> None:
+        self.netease_enabled.stop()
 
     async def test_playlist_search_then_select_enqueues_netease_tracks(self) -> None:
         search_result = {

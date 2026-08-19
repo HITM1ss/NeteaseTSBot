@@ -13,6 +13,7 @@ import {
 import EmptyState from '../components/EmptyState.vue'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
 import { apiPost } from '../api'
+import { appConfig } from '../appConfig'
 import { useTransientMessage } from '../composables/useTransientMessage'
 import { buildNeteaseQueuePayload } from '../utils/queue'
 import {
@@ -59,6 +60,10 @@ function isBilibiliSong(song: FavoriteSong): boolean {
   return song.source === 'bilibili' || String(song.track_id || '').startsWith('bilibili:') || !!song.video_id
 }
 
+function isQQMusicSong(song: FavoriteSong): boolean {
+  return song.source === 'qqmusic' || String(song.track_id || '').startsWith('qqmusic:') || !!song.song_mid
+}
+
 function getSongArtists(song: FavoriteSong): string {
   if (song.artist) return song.artist
   return (song.ar || []).map((artist) => artist.name).join(', ')
@@ -79,7 +84,7 @@ function getSongWebpageUrl(song: FavoriteSong): string {
 function getSongSourceLabel(song: FavoriteSong): string {
   if (isBilibiliSong(song)) return 'B站'
   if (song.source === 'qqmusic') return 'QQ音乐'
-  return '网易云'
+  return '网易云（已禁用）'
 }
 
 function getBilibiliVideoId(song: FavoriteSong): string {
@@ -110,6 +115,20 @@ async function playSong(song: FavoriteSong) {
       return
     }
 
+    if (isQQMusicSong(song)) {
+      await apiPost('/queue/qqmusic', {
+        song_mid: String(song.song_mid || String(song.track_id || '').split(':', 2)[1] || ''),
+        title: song.name,
+        artist: getSongArtists(song),
+        play_now: true,
+        quality: '320',
+        album_mid: String(song.album_mid || ''),
+        duration_ms: song.dt,
+      })
+      return
+    }
+
+    if (!appConfig.neteaseEnabled) throw new Error('网易云功能已禁用')
     await apiPost('/queue/netease', buildNeteaseQueuePayload(song, true))
   } catch (e: any) {
     const msg = String(e?.message ?? e)
@@ -137,6 +156,20 @@ async function addToQueue(song: FavoriteSong) {
       return
     }
 
+    if (isQQMusicSong(song)) {
+      await apiPost('/queue/qqmusic', {
+        song_mid: String(song.song_mid || String(song.track_id || '').split(':', 2)[1] || ''),
+        title: song.name,
+        artist: getSongArtists(song),
+        play_now: false,
+        quality: '320',
+        album_mid: String(song.album_mid || ''),
+        duration_ms: song.dt,
+      })
+      return
+    }
+
+    if (!appConfig.neteaseEnabled) throw new Error('网易云功能已禁用')
     await apiPost('/queue/netease', buildNeteaseQueuePayload(song, false))
   } catch (e: any) {
     const msg = String(e?.message ?? e)
@@ -190,6 +223,7 @@ onMounted(refresh)
         </button>
 
         <button
+          v-if="appConfig.neteaseEnabled"
           class="btn-secondary text-sm py-1.5 px-3"
           :class="activeTab === 'playlists' ? 'bg-pink-50 text-pink-700 border-pink-200' : ''"
           @click="activeTab = 'playlists'"
@@ -206,7 +240,7 @@ onMounted(refresh)
           v-if="sortedSongs.length === 0"
           :icon="Music"
           title="暂无本地收藏歌曲"
-          description="你可以在网易云、QQ音乐或 B 站搜索结果里点击心形收藏到本地"
+          description="你可以在 QQ 音乐或 B 站搜索结果里点击心形收藏到本地"
         />
 
         <div v-else class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden max-w-6xl mx-auto">

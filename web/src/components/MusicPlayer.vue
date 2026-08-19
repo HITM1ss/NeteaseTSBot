@@ -238,7 +238,7 @@
               </label>
 
               <!-- Netease Quality Setting -->
-              <div class="pt-2 border-t border-gray-100">
+              <div v-if="appConfig.neteaseEnabled" class="pt-2 border-t border-gray-100">
                 <div class="text-xs font-semibold uppercase tracking-[0.24em] text-gray-400 mb-2">网易云默认音质</div>
                 <div class="grid grid-cols-2 gap-2">
                   <button
@@ -302,6 +302,7 @@ import {
   ChevronDown,
 } from 'lucide-vue-next'
 import { apiGet, apiPost, apiPut } from '../api'
+import { appConfig } from '../appConfig'
 import { isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
 import {
   NETEASE_QUALITY_OPTIONS,

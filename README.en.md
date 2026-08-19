@@ -89,6 +89,8 @@ Music source dependency notes:
 
 ## Netease Support (Optional, via `NeteaseCloudMusicApi`)
 
+Netease support is **disabled by default**. When `TSBOT_ENABLE_NETEASE=0`, the backend rejects Netease requests and the web console hides Netease-only pages; `NeteaseCloudMusicApi` does not need to run. Set `TSBOT_ENABLE_NETEASE=1` and configure `TSBOT_NETEASE_API_BASE` only if you want to restore it.
+
 This project does **not** directly call Netease official APIs. Instead, it forwards through your own `NeteaseCloudMusicApi` deployment.
 
 - **NPM**: https://www.npmjs.com/package/NeteaseCloudMusicApi

@@ -11,16 +11,17 @@ import SettingsView from './views/SettingsView.vue'
 import LoginView from './views/LoginView.vue'
 import ChangePasswordView from './views/ChangePasswordView.vue'
 import { refreshAuth } from './auth'
+import { appConfig } from './appConfig'
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', redirect: '/search' },
     { path: '/search', component: SearchView },
-    { path: '/likes', component: LikesView },
+    { path: '/likes', component: LikesView, meta: { neteaseOnly: true } },
     { path: '/favorites', component: FavoritesView },
-    { path: '/playlists', component: PlaylistsView },
-    { path: '/playlist/:id', component: PlaylistDetailView },
+    { path: '/playlists', component: PlaylistsView, meta: { neteaseOnly: true } },
+    { path: '/playlist/:id', component: PlaylistDetailView, meta: { neteaseOnly: true } },
     { path: '/queue', component: QueueView },
     { path: '/history', component: HistoryView },
     { path: '/login', name: 'login', component: LoginView, meta: { authPage: true } },
@@ -32,6 +33,9 @@ export const router = createRouter({
 })
 
 router.beforeEach(async (to: RouteLocationNormalized) => {
+  if (to.meta.neteaseOnly && !appConfig.neteaseEnabled) {
+    return '/search'
+  }
   const status = await refreshAuth(true)
   if (status.authenticated && status.must_change_password && to.name !== 'change-password') {
     return { name: 'change-password' }

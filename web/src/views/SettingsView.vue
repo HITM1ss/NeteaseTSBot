@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Check, Eye, EyeOff, Image as ImageIcon, KeyRound, LogOut, RefreshCw, Save, ServerCog, Trash2, Upload } from 'lucide-vue-next'
 import { apiDelete, apiGet, apiPut, apiPutFile, apiUrl } from '../api'
 import { logout } from '../auth'
-import { loadAppBranding } from '../appConfig'
+import { appConfig, loadAppBranding } from '../appConfig'
 import FloatingToast from '../components/FloatingToast.vue'
 import CookieView from './CookieView.vue'
 
@@ -80,7 +80,10 @@ const toastType = ref<'success' | 'error' | 'info'>('info')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 let waitGeneration = 0
 
-const activeFields = computed(() => payload.value?.fields.filter((field) => field.group === activeGroup.value) || [])
+const activeFields = computed(() => payload.value?.fields.filter((field) => (
+  field.group === activeGroup.value
+  && (appConfig.neteaseEnabled || field.key !== 'backend.netease_api_base')
+)) || [])
 const activeAssets = computed(() => payload.value?.assets.filter((asset) => asset.group === activeGroup.value) || [])
 const activeNeedsVoiceRestart = computed(() => (
   activeFields.value.some((field) => field.restart === 'voice')
