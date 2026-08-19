@@ -164,23 +164,34 @@ async function enqueueQQMusicTrack(track: any, playNow: boolean): Promise<void> 
 }
 
 function getTrackSongMid(track: any): string {
-  return String(track?.mid || track?.songmid || '').trim()
+  return String(track?.mid || track?.songmid || track?.song_mid || '').trim()
 }
 
 function getTrackTitle(track: any): string {
-  return String(track?.name || getTrackSongMid(track) || '未知歌曲').trim()
+  return String(
+    track?.name ||
+    track?.songname ||
+    track?.title ||
+    track?.songorig ||
+    getTrackSongMid(track) ||
+    '未知歌曲',
+  ).trim()
 }
 
 function getTrackArtist(track: any): string {
-  return ((track?.singer || track?.artists) || []).map((artist: any) => artist?.name).filter(Boolean).join(', ')
+  const artists = track?.singer || track?.artists || track?.artist
+  if (Array.isArray(artists)) {
+    return artists.map((artist: any) => artist?.name || artist).filter(Boolean).join(', ')
+  }
+  return String(artists || '').trim()
 }
 
 function getTrackAlbum(track: any): string {
-  return String(track?.album?.name || track?.albumname || '').trim()
+  return String(track?.album?.name || track?.album?.title || track?.albumname || track?.album || '').trim()
 }
 
 function getTrackAlbumMid(track: any): string {
-  return String(track?.album?.mid || track?.albummid || '').trim()
+  return String(track?.album?.mid || track?.albummid || track?.album_mid || '').trim()
 }
 
 function getTrackArtwork(track: any): string {
@@ -190,7 +201,9 @@ function getTrackArtwork(track: any): string {
 
 function getTrackDurationMs(track: any): number | undefined {
   const interval = Number(track?.interval)
-  return Number.isFinite(interval) && interval > 0 ? interval * 1000 : undefined
+  if (Number.isFinite(interval) && interval > 0) return interval * 1000
+  const duration = Number(track?.duration_ms ?? track?.duration)
+  return Number.isFinite(duration) && duration > 0 ? (duration > 1000 ? duration : duration * 1000) : undefined
 }
 
 function normalizeCoverUrl(value: any): string {
@@ -355,7 +368,7 @@ onMounted(() => {
             <tbody class="divide-y divide-gray-50">
               <tr 
                 v-for="(track, index) in tracks" 
-                :key="track.mid || track.songmid || track.id || index"
+                :key="track.mid || track.songmid || track.song_mid || track.id || index"
                 class="group hover:bg-blue-50/50 transition-colors duration-200"
               >
                 <td class="px-3 md:px-6 py-3 md:py-4 text-center text-gray-400 text-sm group-hover:text-blue-600 font-medium w-10 md:w-16">

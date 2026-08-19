@@ -148,8 +148,8 @@ async function addPlaylistToQueue(playlist: any) {
     let addedCount = 0
     const failed: string[] = []
     for (const [index, track] of tracks.entries()) {
-      const songMid = String(track?.mid || track?.songmid || '').trim()
-      const title = String(track?.name || songMid || '未知歌曲').trim()
+      const songMid = getTrackSongMid(track)
+      const title = getTrackTitle(track)
       status.value = `正在添加 ${index + 1}/${tracks.length}：${title}`
       if (!songMid) {
         failed.push(title)
@@ -189,15 +189,34 @@ async function addPlaylistToQueue(playlist: any) {
 }
 
 function getTrackArtist(track: any): string {
-  return ((track?.singer || track?.artists) || []).map((artist: any) => artist?.name).filter(Boolean).join(', ')
+  const artists = track?.singer || track?.artists || track?.artist
+  if (Array.isArray(artists)) {
+    return artists.map((artist: any) => artist?.name || artist).filter(Boolean).join(', ')
+  }
+  return String(artists || '').trim()
+}
+
+function getTrackSongMid(track: any): string {
+  return String(track?.mid || track?.songmid || track?.song_mid || '').trim()
+}
+
+function getTrackTitle(track: any): string {
+  return String(
+    track?.name ||
+    track?.songname ||
+    track?.title ||
+    track?.songorig ||
+    getTrackSongMid(track) ||
+    '未知歌曲',
+  ).trim()
 }
 
 function getTrackAlbum(track: any): string {
-  return String(track?.album?.name || track?.albumname || '').trim()
+  return String(track?.album?.name || track?.album?.title || track?.albumname || track?.album || '').trim()
 }
 
 function getTrackAlbumMid(track: any): string {
-  return String(track?.album?.mid || track?.albummid || '').trim()
+  return String(track?.album?.mid || track?.albummid || track?.album_mid || '').trim()
 }
 
 function getTrackArtwork(track: any): string {
@@ -207,7 +226,9 @@ function getTrackArtwork(track: any): string {
 
 function getTrackDurationMs(track: any): number | undefined {
   const interval = Number(track?.interval)
-  return Number.isFinite(interval) && interval > 0 ? interval * 1000 : undefined
+  if (Number.isFinite(interval) && interval > 0) return interval * 1000
+  const duration = Number(track?.duration_ms ?? track?.duration)
+  return Number.isFinite(duration) && duration > 0 ? (duration > 1000 ? duration : duration * 1000) : undefined
 }
 
 function formatPlayCount(count: number): string {

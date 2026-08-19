@@ -1222,10 +1222,15 @@ def _normalize_netease_search_items(data: dict) -> list[dict]:
 
 
 def _extract_qqmusic_artist_names(song: dict) -> str:
-    artists = (song.get("singer") or song.get("artists") or [])
+    artists = song.get("singer") or song.get("artists") or song.get("artist") or []
+    if isinstance(artists, str):
+        return artists.strip()
     if not isinstance(artists, list):
         return ""
-    names = [str((artist or {}).get("name") or "").strip() for artist in artists if isinstance(artist, dict)]
+    names = [
+        str(artist.get("name") if isinstance(artist, dict) else artist or "").strip()
+        for artist in artists
+    ]
     return ", ".join([name for name in names if name])
 
 
@@ -1240,12 +1245,19 @@ def _normalize_qqmusic_song(song: dict) -> dict | None:
     interval = _coerce_positive_int(song.get("interval"))
     duration_ms = interval * 1000 if interval is not None else None
     artwork_url = qqmusic.get_song_cover_image(album_mid) if album_mid else ""
+    title = str(
+        song.get("name")
+        or song.get("songname")
+        or song.get("title")
+        or song.get("songorig")
+        or song_mid
+    ).strip()
 
     return {
         "source": "qqmusic",
         "track_id": f"qqmusic:{song_mid}",
         "song_mid": song_mid,
-        "title": str(song.get("name") or song_mid).strip(),
+        "title": title,
         "artist": _extract_qqmusic_artist_names(song),
         "album": album_name,
         "album_mid": album_mid,

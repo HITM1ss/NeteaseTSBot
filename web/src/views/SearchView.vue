@@ -269,7 +269,7 @@ async function enqueue(song: any, playNow: boolean) {
       status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
     } else if (selectedPlatform.value === 'qqmusic') {
       const res = await apiPost<{ ok: boolean; id: number; source_url: string }>('/queue/qqmusic', {
-        song_mid: String(song.mid || song.songmid),
+        song_mid: String(song.mid || song.songmid || song.song_mid),
         title: getSongTitle(song),
         artist: getSongArtist(song),
         album: getSongAlbum(song),
@@ -353,12 +353,16 @@ function getSongKey(song: any): string {
 }
 
 function getSongTitle(song: any): string {
-  return String(song?.name || song?.title || '').trim()
+  return String(song?.name || song?.songname || song?.title || song?.songorig || '').trim()
 }
 
 function getSongArtist(song: any): string {
   if (selectedPlatform.value === 'qqmusic') {
-    return ((song?.singer || song?.artists) || []).map((a: any) => a?.name).filter(Boolean).join(', ')
+    const artists = song?.singer || song?.artists || song?.artist
+    if (Array.isArray(artists)) {
+      return artists.map((a: any) => a?.name || a).filter(Boolean).join(', ')
+    }
+    return String(artists || '').trim()
   }
   if (selectedPlatform.value === 'bilibili') {
     return String(song?.artist || song?.author || song?.owner?.name || '').trim()
@@ -368,7 +372,7 @@ function getSongArtist(song: any): string {
 
 function getSongAlbum(song: any): string {
   if (selectedPlatform.value === 'qqmusic') {
-    return String(song?.album?.name || song?.albumname || '').trim()
+    return String(song?.album?.name || song?.album?.title || song?.albumname || song?.album || '').trim()
   }
   if (selectedPlatform.value === 'bilibili') {
     return String(song?.album || song?.typename || '').trim()

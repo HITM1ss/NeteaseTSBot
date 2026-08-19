@@ -209,6 +209,28 @@ class NeteaseFeatureFlagTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(main.public_config()["netease_enabled"])
 
 
+class QQMusicNormalizationTests(unittest.TestCase):
+    def test_playlist_payload_uses_songname_and_songmid_fields(self) -> None:
+        normalized = main._normalize_qqmusic_song(
+            {
+                "songmid": "002r2KrX1JWd1pg",
+                "songname": "测试歌曲",
+                "singer": [{"name": "测试歌手"}],
+                "albumname": "测试专辑",
+                "albummid": "003albummid",
+                "interval": 210,
+            }
+        )
+
+        self.assertIsNotNone(normalized)
+        assert normalized is not None
+        self.assertEqual("002r2KrX1JWd1pg", normalized["song_mid"])
+        self.assertEqual("测试歌曲", normalized["title"])
+        self.assertEqual("测试歌手", normalized["artist"])
+        self.assertEqual("测试专辑", normalized["album"])
+        self.assertEqual(210000, normalized["duration_ms"])
+
+
 class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main._ts_playlist_results.clear()
