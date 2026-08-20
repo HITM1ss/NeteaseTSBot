@@ -713,6 +713,93 @@ class QQMusicQueueTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PlaybackCompletionTests(unittest.IsolatedAsyncioTestCase):
+    def test_only_permanent_playback_failures_are_auto_skipped(self) -> None:
+        unavailable = HTTPException(
+            status_code=404,
+            detail="无法获取 QQ 音乐播放链接，可能需要 VIP 会员或该歌曲不可用",
+        )
+
+        self.assertTrue(main._should_auto_skip_unplayable_queue_item(unavailable))
+        self.assertTrue(
+            main._should_auto_skip_unplayable_queue_item(
+                HTTPException(status_code=402, detail="需要 VIP")
+            )
+        )
+        self.assertTrue(
+            main._should_auto_skip_unplayable_queue_item(
+                HTTPException(status_code=403, detail="无版权")
+            )
+        )
+        self.assertFalse(
+            main._should_auto_skip_unplayable_queue_item(
+                HTTPException(status_code=400, detail="admin qqmusic cookie not set")
+            )
+        )
+        self.assertFalse(
+            main._should_auto_skip_unplayable_queue_item(
+                HTTPException(status_code=409, detail="playback request superseded")
+            )
+        )
+        self.assertFalse(
+            main._should_auto_skip_unplayable_queue_item(
+                HTTPException(status_code=502, detail="upstream temporarily unavailable")
+            )
+        )
+
+    async def test_auto_play_skips_unavailable_qqmusic_item_and_continues(self) -> None:
+        session = unittest.mock.Mock()
+        session.execute.return_value.scalars.return_value.first.return_value = SimpleNamespace(id=42)
+        error = HTTPException(
+            status_code=404,
+            detail="无法获取 QQ 音乐播放链接，可能需要 VIP 会员或该歌曲不可用",
+        )
+
+        with (
+            patch.object(main, "_shuffle_enabled", False),
+            patch.object(main, "_repeat_mode", "none"),
+            patch.object(main, "_current_queue_item_id", None),
+            patch.object(main, "new_session", return_value=session),
+            patch.object(main, "_play_queue_item_internal", AsyncMock(side_effect=error)),
+            patch.object(main, "_skip_unplayable_queue_item", AsyncMock()) as skip_item,
+        ):
+            await main._auto_play_next_from_queue()
+
+        skip_item.assert_awaited_once_with(42, reason=str(error.detail))
+        session.close.assert_called_once_with()
+
+    async def test_skip_unplayable_item_deletes_it_notifies_and_plays_next(self) -> None:
+        with (
+            patch.object(main, "_delete_queue_item", AsyncMock()) as delete_item,
+            patch.object(main.voice, "send_notice", AsyncMock()) as send_notice,
+            patch.object(main, "_auto_play_next_from_queue", AsyncMock()) as play_next,
+        ):
+            await main._skip_unplayable_queue_item(
+                11,
+                reason="  无法获取 QQ 音乐播放链接，可能需要 VIP 会员或该歌曲不可用  ",
+            )
+
+        delete_item.assert_awaited_once_with(11)
+        send_notice.assert_awaited_once_with(
+            "无法播放，已跳过: #11\n无法获取 QQ 音乐播放链接，可能需要 VIP 会员或该歌曲不可用\n将播放下一首",
+            target_mode=2,
+        )
+        play_next.assert_awaited_once_with(start_after_id=11)
+
+    async def test_web_play_keeps_missing_queue_item_as_not_found(self) -> None:
+        session = unittest.mock.Mock()
+        session.get.return_value = None
+
+        with (
+            patch.object(main, "_play_queue_item_internal", AsyncMock(return_value=False)),
+            patch.object(main, "_skip_unplayable_queue_item", AsyncMock()) as skip_item,
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await main.play_queue_item(99, session=session)
+
+        self.assertEqual(404, raised.exception.status_code)
+        self.assertEqual("queue item not found", raised.exception.detail)
+        skip_item.assert_not_awaited()
+
     async def test_shuffle_next_skips_legacy_netease_row_without_cookie_error(self) -> None:
         with (
             patch.object(main, "_shuffle_enabled", True),
@@ -726,6 +813,7 @@ class PlaybackCompletionTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(side_effect=HTTPException(status_code=400, detail="admin netease cookie not set")),
             ),
             patch.object(main, "_delete_queue_item", AsyncMock()) as delete_item,
+            patch.object(main.voice, "send_notice", AsyncMock()),
             patch.object(main, "_auto_play_next_from_queue", AsyncMock()) as play_next,
         ):
             result = await main.voice_next()
@@ -747,6 +835,22 @@ class PlaybackCompletionTests(unittest.IsolatedAsyncioTestCase):
         replay.assert_awaited_once_with(7, requested_by="auto")
         delete_item.assert_not_awaited()
         play_next.assert_not_awaited()
+
+    async def test_repeat_one_skips_song_that_becomes_unavailable(self) -> None:
+        error = HTTPException(
+            status_code=404,
+            detail="无法获取 QQ 音乐播放链接，可能需要 VIP 会员或该歌曲不可用",
+        )
+
+        with (
+            patch.object(main, "_repeat_mode", "one"),
+            patch.object(main, "_take_now_playing_if_match", AsyncMock(return_value=7)),
+            patch.object(main, "_play_queue_item_internal", AsyncMock(side_effect=error)),
+            patch.object(main, "_skip_unplayable_queue_item", AsyncMock()) as skip_item,
+        ):
+            await main._handle_playback_finished("source")
+
+        skip_item.assert_awaited_once_with(7, reason=str(error.detail))
 
     async def test_normal_completion_deletes_item_and_plays_next(self) -> None:
         with (

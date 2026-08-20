@@ -883,6 +883,73 @@ async def _clear_queue_internal(session: Session) -> dict:
 _remove_queue_item_internal = _delete_queue_item
 
 
+_AUTO_SKIP_PLAYBACK_STATUS_CODES = frozenset({402, 403, 404, 410, 422})
+_LEGACY_NETEASE_SKIP_DETAILS = frozenset({
+    "admin netease cookie not set",
+    "网易云功能已禁用",
+})
+_QUEUE_CONFIGURATION_ERROR_DETAILS = frozenset({
+    "admin qqmusic cookie not set",
+    "failed to decrypt admin qqmusic cookie",
+})
+_MALFORMED_QUEUE_ITEM_MARKERS = (
+    "qqmusic song_mid is empty",
+    "video_id is empty",
+    "invalid bilibili video_id",
+    "b站视频时长过长",
+)
+
+
+def _should_auto_skip_unplayable_queue_item(exc: HTTPException) -> bool:
+    """Return whether an error means this queue item can never be played.
+
+    Authentication, rate-limit, and upstream service failures are intentionally
+    retained: deleting every queued song while an account or music service is
+    temporarily unavailable would be more harmful than pausing playback.
+    """
+    detail = str(exc.detail or "").strip()
+    normalized_detail = detail.lower()
+
+    if detail in _LEGACY_NETEASE_SKIP_DETAILS:
+        return True
+    if detail in _QUEUE_CONFIGURATION_ERROR_DETAILS:
+        return False
+    if exc.status_code in _AUTO_SKIP_PLAYBACK_STATUS_CODES:
+        return True
+    return exc.status_code == 400 and any(marker in normalized_detail for marker in _MALFORMED_QUEUE_ITEM_MARKERS)
+
+
+def _compact_playback_failure_reason(reason: str, *, limit: int = 160) -> str:
+    compact = " ".join(str(reason or "").split())
+    if not compact:
+        return "音源不可用"
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit - 1]}…"
+
+
+async def _skip_unplayable_queue_item(
+    item_id: int,
+    *,
+    reason: str,
+    start_after_id: int | None = None,
+) -> None:
+    """Discard a permanently unplayable queue item and continue playback."""
+    message = _compact_playback_failure_reason(reason)
+    logger.warning("skip unplayable queue item id=%s: %s", item_id, message)
+    await _delete_queue_item(item_id)
+    try:
+        await voice.send_notice(
+            f"无法播放，已跳过: #{item_id}\n{message}\n将播放下一首",
+            target_mode=2,
+        )
+    except Exception:
+        pass
+    await _auto_play_next_from_queue(
+        start_after_id=item_id if start_after_id is None else start_after_id,
+    )
+
+
 async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> None:
     global _current_shuffle_index, _shuffle_queue
     
@@ -966,20 +1033,14 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
     try:
         played = await _play_queue_item_internal(item_id, requested_by="auto")
     except HTTPException as exc:
-        detail = str(exc.detail or "").strip()
-        # Old Netease rows are intentionally retained during migration, but a
-        # missing legacy cookie must not block newer QQ Music items.
-        if detail in {"admin netease cookie not set", "网易云功能已禁用"}:
-            await _delete_queue_item(item_id)
-            await _auto_play_next_from_queue(start_after_id=item_id)
+        if _should_auto_skip_unplayable_queue_item(exc):
+            await _skip_unplayable_queue_item(item_id, reason=str(exc.detail or ""))
             return
         raise
     if not played:
-        # Compatibility queues may still contain disabled Netease items (or a
-        # row may disappear between selection and playback). Do not let one
-        # stale row block all subsequent QQ Music/Bilibili items.
-        await _delete_queue_item(item_id)
-        await _auto_play_next_from_queue(start_after_id=item_id)
+        # A row may disappear between selection and playback. Do not let the
+        # stale queue position block all subsequent QQ Music/Bilibili items.
+        await _skip_unplayable_queue_item(item_id, reason="队列歌曲已不存在或不可播放")
 
 
 def _serialize_queue_item(row: QueueItem) -> dict:
@@ -2751,14 +2812,19 @@ async def voice_next() -> dict:
         _current_shuffle_index = next_index
         
         try:
-            await _play_queue_item_internal(item_id, requested_by="next")
+            played = await _play_queue_item_internal(item_id, requested_by="next")
         except HTTPException as exc:
             detail = str(exc.detail or "").strip()
-            if detail in {"admin netease cookie not set", "网易云功能已禁用"}:
-                await _delete_queue_item(item_id)
-                await _auto_play_next_from_queue(start_after_id=item_id)
+            if detail in _LEGACY_NETEASE_SKIP_DETAILS:
+                await _skip_unplayable_queue_item(item_id, reason=detail)
                 return {"ok": True, "action": "skipped_legacy_netease"}
+            if _should_auto_skip_unplayable_queue_item(exc):
+                await _skip_unplayable_queue_item(item_id, reason=detail)
+                return {"ok": True, "action": "skipped_unplayable"}
             raise
+        if not played:
+            await _skip_unplayable_queue_item(item_id, reason="队列歌曲已不存在或不可播放")
+            return {"ok": True, "action": "skipped_unplayable"}
         return {"ok": True, "action": "play_shuffled_next"}
     else:
         # Regular next behavior - just play next without removing current
@@ -4327,9 +4393,17 @@ async def _handle_chat_command(
             if first_item_id is None:
                 await reply("播放队列为空")
                 return
-            ok = await _play_queue_item_internal(first_item_id, requested_by=invoker_name or "ts")
+            try:
+                ok = await _play_queue_item_internal(first_item_id, requested_by=invoker_name or "ts")
+            except HTTPException as exc:
+                if _should_auto_skip_unplayable_queue_item(exc):
+                    await _skip_unplayable_queue_item(first_item_id, reason=str(exc.detail or ""))
+                    await reply("队首歌曲无法播放，已跳过并尝试播放下一首")
+                    return
+                raise
             if not ok:
-                await reply("播放队列第一首歌曲失败，歌曲可能已被移除")
+                await _skip_unplayable_queue_item(first_item_id, reason="队列歌曲已不存在或不可播放")
+                await reply("队首歌曲无法播放，已跳过并尝试播放下一首")
                 return
             label = f"{first_title} - {first_artist}".strip(" -")
             await reply(f"已播放队列第一首: {label}")
@@ -4437,7 +4511,15 @@ async def _handle_playback_finished(source_url: str) -> None:
     if item_id is None:
         return
     if _repeat_mode == "one":
-        await _play_queue_item_internal(item_id, requested_by="auto")
+        try:
+            replayed = await _play_queue_item_internal(item_id, requested_by="auto")
+        except HTTPException as exc:
+            if _should_auto_skip_unplayable_queue_item(exc):
+                await _skip_unplayable_queue_item(item_id, reason=str(exc.detail or ""))
+                return
+            raise
+        if not replayed:
+            await _skip_unplayable_queue_item(item_id, reason="队列歌曲已不存在或不可播放")
         return
     await _delete_queue_item(item_id)
     await _auto_play_next_from_queue()
@@ -4483,15 +4565,10 @@ async def _chat_command_worker() -> None:
                         if ty == 3:
                             item_id = await _take_now_playing_if_match(source_url=src)
                             if item_id is not None:
-                                await _delete_queue_item(item_id)
-                                try:
-                                    await voice.send_notice(
-                                        f"播放失败，已跳过并删除: #{item_id}\n将播放下一首",
-                                        target_mode=2,
-                                    )
-                                except Exception:
-                                    pass
-                                await _auto_play_next_from_queue()
+                                await _skip_unplayable_queue_item(
+                                    item_id,
+                                    reason=str(getattr(pb, "detail", "") or "播放过程发生错误"),
+                                )
                         continue
                 except Exception:
                     logger.exception("chat worker: failed to handle event")
@@ -5138,9 +5215,18 @@ def delete_queue_item(item_id: int, session: Session = Depends(get_session)) -> 
 
 @app.post("/queue/{item_id}/play")
 async def play_queue_item(item_id: int, session: Session = Depends(get_session)) -> dict:
-    ok = await _play_queue_item_internal(item_id, requested_by="web")
+    try:
+        ok = await _play_queue_item_internal(item_id, requested_by="web")
+    except HTTPException as exc:
+        if _should_auto_skip_unplayable_queue_item(exc):
+            await _skip_unplayable_queue_item(item_id, reason=str(exc.detail or ""))
+            return {"ok": True, "action": "skipped_unplayable", "skipped_item_id": item_id}
+        raise
     if not ok:
-        raise HTTPException(status_code=404, detail="queue item not found")
+        if session.get(QueueItem, item_id) is None:
+            raise HTTPException(status_code=404, detail="queue item not found")
+        await _skip_unplayable_queue_item(item_id, reason="队列歌曲已不存在或不可播放")
+        return {"ok": True, "action": "skipped_unplayable", "skipped_item_id": item_id}
 
     _schedule_ts_description_update()
     return {"ok": True}
