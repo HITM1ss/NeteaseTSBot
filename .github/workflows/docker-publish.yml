@@ -101,6 +101,8 @@ jobs:
         env:
           DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          IMAGE_SUFFIX: ${{ matrix.image_suffix }}
         run: |
           namespace="${DOCKERHUB_NAMESPACE:-$DOCKERHUB_USERNAME}"
           if [ -z "$namespace" ]; then
@@ -112,18 +114,22 @@ jobs:
           echo "namespace=${namespace}" >> "$GITHUB_OUTPUT"
           echo "ghcr_owner=${ghcr_owner}" >> "$GITHUB_OUTPUT"
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
-
-      - name: Check Docker Hub credentials
-        if: github.event_name != 'pull_request'
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          test -n "$DOCKERHUB_USERNAME" || { echo 'Missing secret: DOCKERHUB_USERNAME'; exit 1; }
-          test -n "$DOCKERHUB_TOKEN" || { echo 'Missing secret: DOCKERHUB_TOKEN'; exit 1; }
+          dockerhub_enabled=false
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            dockerhub_enabled=true
+          fi
+          echo "dockerhub_enabled=${dockerhub_enabled}" >> "$GITHUB_OUTPUT"
+          {
+            echo "images<<EOF"
+            echo "ghcr.io/${ghcr_owner}/${repo}-${IMAGE_SUFFIX}"
+            if [ "$dockerhub_enabled" = "true" ]; then
+              echo "docker.io/${namespace}/${repo}-${IMAGE_SUFFIX}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.prep.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: docker.io
@@ -142,9 +148,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            docker.io/${{ steps.prep.outputs.namespace }}/${{ steps.prep.outputs.repo }}-${{ matrix.image_suffix }}
-            ghcr.io/${{ steps.prep.outputs.ghcr_owner }}/${{ steps.prep.outputs.repo }}-${{ matrix.image_suffix }}
+          images: ${{ steps.prep.outputs.images }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
