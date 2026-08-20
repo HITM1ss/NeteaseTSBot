@@ -82,6 +82,59 @@ class BilibiliAudioCacheTests(unittest.TestCase):
             self.assertFalse(other_path.exists())
 
 
+class AdminCacheTests(unittest.TestCase):
+    def test_cache_status_reports_bilibili_audio_disk_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            (cache_dir / "BVONE.m4a").write_bytes(b"1234")
+            (cache_dir / "BVTWO.m4s.part").write_bytes(b"567")
+
+            with (
+                patch.object(main, "BILIBILI_AUDIO_DIR", cache_dir),
+                patch.object(main, "require_admin"),
+                patch.dict(main._bilibili_view_summary_cache, {}, clear=True),
+                patch.dict(main._bilibili_subtitle_cache, {}, clear=True),
+            ):
+                result = main.admin_cache_status(object(), object())
+
+        self.assertEqual(2, result["total_files"])
+        self.assertEqual(7, result["total_bytes"])
+        self.assertEqual(2, result["bilibili_audio"]["file_count"])
+        self.assertEqual(7, result["bilibili_audio"]["size_bytes"])
+        self.assertEqual(0, result["memory_entries"]["bilibili_view_summaries"])
+        self.assertEqual(0, result["memory_entries"]["bilibili_subtitles"])
+
+    def test_clear_cache_preserves_currently_playing_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            active_path = cache_dir / "BVACTIVE.m4a"
+            cached_path = cache_dir / "BVCACHED.m4a"
+            active_path.write_bytes(b"active")
+            cached_path.write_bytes(b"cached")
+
+            with (
+                patch.object(main, "BILIBILI_AUDIO_DIR", cache_dir),
+                patch.object(main, "_current_source_url", str(active_path)),
+                patch.object(main, "require_admin", return_value=(object(), object())),
+                patch.object(main, "require_csrf"),
+                patch.dict(main._bilibili_view_summary_cache, {"BV1": (0.0, {})}, clear=True),
+                patch.dict(main._bilibili_subtitle_cache, {"BV2": (0.0, [])}, clear=True),
+            ):
+                result = main.admin_clear_cache(object(), object())
+
+                self.assertTrue(active_path.exists())
+                self.assertFalse(cached_path.exists())
+                self.assertEqual(1, result["removed_files"])
+                self.assertEqual(len(b"cached"), result["removed_bytes"])
+                self.assertEqual(1, result["skipped_files"])
+                self.assertEqual(len(b"active"), result["skipped_bytes"])
+                self.assertEqual(2, result["cleared_memory_entries"])
+                self.assertEqual(1, result["total_files"])
+                self.assertEqual(len(b"active"), result["total_bytes"])
+                self.assertEqual(0, result["memory_entries"]["bilibili_view_summaries"])
+                self.assertEqual(0, result["memory_entries"]["bilibili_subtitles"])
+
+
 class AdminCookieStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         self.netease_enabled = patch.object(main.settings, "enable_netease", True)

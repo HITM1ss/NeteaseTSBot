@@ -1,15 +1,12 @@
-type NeteaseArtist = { name: string }
+export type MusicSource = 'qqmusic' | 'bilibili'
 
-type NeteaseAlbum = {
-  name?: string
-  picUrl?: string
-}
+type Artist = { name: string }
 
 export type FavoriteSong = {
   id: number
   name: string
-  source?: string
-  track_id?: string
+  source: MusicSource
+  track_id: string
   video_id?: string
   song_mid?: string
   album_mid?: string
@@ -18,17 +15,16 @@ export type FavoriteSong = {
   artwork_url?: string
   webpage_url?: string
   description?: string
-  ar?: NeteaseArtist[]
-  al?: NeteaseAlbum
-  dt?: number
+  artists?: Artist[]
+  duration_ms?: number
   _fav_at?: number
 }
 
 export type FavoritePlaylist = {
   id: number
   name: string
+  source: 'qqmusic'
   coverImgUrl?: string
-  picUrl?: string
   playCount?: number
   creator?: { nickname?: string }
   _fav_at?: number
@@ -41,319 +37,197 @@ const BILIBILI_VIDEO_ID_RE = /(BV[0-9A-Za-z]+|av\d+)/i
 function safeParseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback
   try {
-    const obj = JSON.parse(raw)
-    return (obj as T) ?? fallback
+    return (JSON.parse(raw) as T) ?? fallback
   } catch {
     return fallback
   }
 }
 
-function normalizeBilibiliVideoId(value: any): string {
+function normalizeBilibiliVideoId(value: unknown): string {
   const raw = String(value ?? '').trim()
-  if (!raw) return ''
   const match = raw.match(BILIBILI_VIDEO_ID_RE)
   if (!match) return ''
   const token = match[1]
-  if (token.toLowerCase().startsWith('bv')) {
-    return `BV${token.slice(2)}`
-  }
-  return token.toLowerCase()
+  return token.toLowerCase().startsWith('bv') ? `BV${token.slice(2)}` : token.toLowerCase()
 }
 
-function normalizeProtocolUrl(value: any): string {
+function normalizeProtocolUrl(value: unknown): string {
   const raw = String(value ?? '').trim()
   if (!raw) return ''
-  if (raw.startsWith('//')) return `https:${raw}`
-  return raw
+  return raw.startsWith('//') ? `https:${raw}` : raw
 }
 
-function parseDurationMs(value: any): number | undefined {
+function parseDurationMs(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
     return value > 1000 ? value : value * 1000
   }
 
   const raw = String(value ?? '').replace(/,/g, '').trim()
   if (!raw) return undefined
-
   if (/^\d+$/.test(raw)) {
     const numeric = Number(raw)
-    if (!Number.isFinite(numeric) || numeric <= 0) return undefined
-    return numeric > 1000 ? numeric : numeric * 1000
+    return Number.isFinite(numeric) && numeric > 0 ? (numeric > 1000 ? numeric : numeric * 1000) : undefined
   }
 
-  const parts = raw.split(':').map((part) => Number(part))
-  if (!parts.length || parts.some((part) => !Number.isFinite(part) || part < 0)) {
-    return undefined
-  }
-
-  let seconds = 0
-  for (const part of parts) {
-    seconds = seconds * 60 + part
-  }
+  const parts = raw.split(':').map(Number)
+  if (!parts.length || parts.some((part) => !Number.isFinite(part) || part < 0)) return undefined
+  const seconds = parts.reduce((total, part) => total * 60 + part, 0)
   return seconds > 0 ? seconds * 1000 : undefined
 }
 
 function hashToPositiveInt(value: string): number {
   let hash = 2166136261
-  for (let i = 0; i < value.length; i++) {
-    hash ^= value.charCodeAt(i)
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index)
     hash = Math.imul(hash, 16777619)
   }
-  const normalized = hash >>> 0
-  return normalized > 0 ? normalized : 1
+  return (hash >>> 0) || 1
 }
 
-function inferSongSource(input: any): string {
+function isMusicSource(value: unknown): value is MusicSource {
+  return value === 'qqmusic' || value === 'bilibili'
+}
+
+function inferSongSource(input: any): MusicSource | null {
   const explicit = String(input?.source ?? '').trim().toLowerCase()
-  if (explicit) return explicit
+  if (isMusicSource(explicit)) return explicit
 
   const trackId = String(input?.track_id ?? '').trim().toLowerCase()
-  if (trackId.startsWith('bilibili:')) return 'bilibili'
   if (trackId.startsWith('qqmusic:')) return 'qqmusic'
-  if (trackId.startsWith('netease:')) return 'netease'
+  if (trackId.startsWith('bilibili:')) return 'bilibili'
 
   if (normalizeBilibiliVideoId(input?.video_id || input?.bvid || input?.webpage_url || input?.arcurl || input?.track_id)) {
     return 'bilibili'
   }
-
-  if (String(input?.song_mid || input?.songmid || input?.mid || '').trim()) {
-    return 'qqmusic'
-  }
-
-  return 'netease'
+  if (String(input?.song_mid || input?.songmid || input?.mid || '').trim()) return 'qqmusic'
+  return null
 }
 
-function buildFavoriteSongKey(input: any, source = inferSongSource(input)): string {
+function getSongKey(input: any, source: MusicSource): string {
   if (source === 'bilibili') {
     const videoId = normalizeBilibiliVideoId(
       input?.video_id || input?.bvid || input?.track_id || input?.webpage_url || input?.arcurl,
     )
-    if (videoId) return `bilibili:${videoId}`
+    return videoId ? `bilibili:${videoId}` : ''
   }
 
-  if (source === 'qqmusic') {
-    const songMid = String(input?.song_mid || input?.songmid || input?.mid || '').trim()
-    if (songMid) return `qqmusic:${songMid}`
-  }
-
-  if (typeof input === 'string') {
-    const raw = input.trim()
-    if (raw.includes(':')) return raw
-  }
-
+  const songMid = String(input?.song_mid || input?.songmid || input?.mid || '').trim()
+  if (songMid) return `qqmusic:${songMid}`
   const trackId = String(input?.track_id || '').trim()
-  if (trackId) return trackId
-
-  const id = Number(input?.id ?? input)
-  if (Number.isFinite(id) && id > 0) {
-    return `${source || 'netease'}:${id}`
-  }
-
-  return ''
+  return trackId.startsWith('qqmusic:') ? trackId : ''
 }
 
-function extractNumericTrackId(trackKey: string, prefix: string): number | null {
-  const normalized = String(trackKey || '').trim()
-  if (!normalized.startsWith(`${prefix}:`)) return null
-  const raw = normalized.slice(prefix.length + 1).trim()
-  const parsed = Number(raw)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
-}
-
-function getSongArtistName(input: any, source: string): string {
+function getArtist(input: any, source: MusicSource): string {
   if (source === 'bilibili') {
     return String(input?.artist || input?.author || input?.owner?.name || '').trim()
   }
 
-  if (source === 'qqmusic') {
-    const names = ((input?.singer || input?.artists) || [])
-      .map((artist: any) => String(artist?.name || '').trim())
-      .filter(Boolean)
-    return names.join(', ')
-  }
-
-  const names = ((input?.ar || input?.artists) || [])
-    .map((artist: any) => String(artist?.name || '').trim())
-    .filter(Boolean)
-  const joined = names.join(', ')
-  return joined || String(input?.artist || '').trim()
+  const artist = input?.artist
+  if (typeof artist === 'string' && artist.trim()) return artist.trim()
+  const candidates = input?.singer || input?.artists
+  if (!Array.isArray(candidates)) return ''
+  return candidates.map((item: any) => String(item?.name || item || '').trim()).filter(Boolean).join(', ')
 }
 
-function getSongAlbumName(input: any, source: string): string {
-  if (source === 'bilibili') {
-    return String(input?.album || input?.typename || '').trim()
-  }
-
-  if (source === 'qqmusic') {
-    return String(input?.album?.name || input?.albumname || '').trim()
-  }
-
-  return String(input?.al?.name || input?.album?.name || input?.album || '').trim()
+function getAlbum(input: any, source: MusicSource): string {
+  if (source === 'bilibili') return String(input?.album || input?.typename || '').trim()
+  return String(input?.album?.name || input?.album?.title || input?.albumname || input?.album || '').trim()
 }
 
-function getSongArtworkUrl(input: any, source: string): string {
-  if (source === 'bilibili') {
-    return normalizeProtocolUrl(input?.artwork_url || input?.artwork || input?.pic || input?.thumbnail || input?.cover_url)
-  }
+function getArtwork(input: any, source: MusicSource): string {
+  const explicit = normalizeProtocolUrl(input?.artwork_url || input?.artwork || input?.cover_url)
+  if (explicit) return explicit
+  if (source === 'bilibili') return normalizeProtocolUrl(input?.pic || input?.thumbnail)
 
-  if (source === 'qqmusic') {
-    const explicit = normalizeProtocolUrl(input?.artwork_url || input?.artwork || input?.cover_url)
-    if (explicit) return explicit
-    const albumMid = String(input?.album?.pmid || input?.album?.mid || input?.albummid || '').trim()
-    return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ''
-  }
-
-  const raw = normalizeProtocolUrl(
-    input?.artwork_url || input?.artwork || input?.cover_url || input?.al?.picUrl || input?.album?.picUrl || input?.artists?.[0]?.img1v1Url,
-  )
-  return raw ? raw.replace(/\?param=\d+y\d+$/, '') : ''
+  const albumMid = String(input?.album?.pmid || input?.album?.mid || input?.albummid || input?.album_mid || '').trim()
+  return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ''
 }
 
-function getSongWebpageUrl(input: any, source: string): string {
+function getWebpageUrl(input: any, source: MusicSource): string {
   if (source !== 'bilibili') return ''
   const explicit = normalizeProtocolUrl(input?.webpage_url || input?.arcurl || input?.url)
   if (explicit) return explicit
-
   const videoId = normalizeBilibiliVideoId(input?.video_id || input?.bvid || input?.track_id)
   return videoId ? `https://www.bilibili.com/video/${videoId}` : ''
 }
 
-function normalizeArtistList(input: any, artistName: string): NeteaseArtist[] | undefined {
-  const arRaw = input?.ar || input?.artists || input?.singer
-  const normalized = Array.isArray(arRaw)
-    ? arRaw
-        .map((artist: any) => ({ name: String(artist?.name || '').trim() }))
-        .filter((artist: NeteaseArtist) => artist.name)
-    : []
-
-  if (normalized.length > 0) return normalized
-  if (!artistName) return undefined
-  return [{ name: artistName }]
-}
-
-function normalizeAlbum(input: any, albumName: string, artworkUrl: string): NeteaseAlbum | undefined {
-  const alRaw = input?.al
-  if (alRaw && typeof alRaw === 'object') {
-    return {
-      name: alRaw?.name ? String(alRaw.name).trim() : (albumName || undefined),
-      picUrl: alRaw?.picUrl ? normalizeProtocolUrl(alRaw.picUrl) : (artworkUrl || undefined),
-    }
-  }
-
-  const albumRaw = input?.album
-  if (albumRaw && typeof albumRaw === 'object') {
-    return {
-      name: albumRaw?.name ? String(albumRaw.name).trim() : (albumName || undefined),
-      picUrl: albumRaw?.picUrl
-        ? normalizeProtocolUrl(albumRaw.picUrl)
-        : albumRaw?.pic_url
-          ? normalizeProtocolUrl(albumRaw.pic_url)
-          : (artworkUrl || undefined),
-    }
-  }
-
-  if (!albumName && !artworkUrl) return undefined
-  return {
-    name: albumName || undefined,
-    picUrl: artworkUrl || undefined,
-  }
-}
-
 function normalizeSong(input: any): FavoriteSong | null {
   const source = inferSongSource(input)
-  const trackKey = buildFavoriteSongKey(input, source)
+  if (!source) return null
 
-  const derivedNeteaseId = extractNumericTrackId(trackKey, 'netease')
-  const idValue = Number(input?.id)
-  const id = derivedNeteaseId
-    ?? (Number.isFinite(idValue) && idValue > 0 ? idValue : (trackKey ? hashToPositiveInt(trackKey) : NaN))
-  if (!Number.isFinite(id) || id <= 0) return null
+  const trackId = getSongKey(input, source)
+  const name = String(input?.name || input?.songname || input?.title || '').trim()
+  if (!trackId || !name) return null
 
-  const name = String(input?.name || input?.title || '').trim()
-  if (!name) return null
-
-  const artist = getSongArtistName(input, source)
-  const album = getSongAlbumName(input, source)
-  const artworkUrl = getSongArtworkUrl(input, source)
-  const dt = parseDurationMs(input?.dt ?? input?.duration_ms ?? input?.duration)
+  const artist = getArtist(input, source)
+  const album = getAlbum(input, source)
+  const artworkUrl = getArtwork(input, source)
   const videoId = normalizeBilibiliVideoId(input?.video_id || input?.bvid || input?.track_id || input?.webpage_url || input?.arcurl)
   const songMid = String(input?.song_mid || input?.songmid || input?.mid || '').trim()
   const albumMid = String(input?.album_mid || input?.album?.mid || input?.albummid || '').trim()
-  const description = String(input?.description || input?.desc || '').trim()
-  const webpageUrl = getSongWebpageUrl(input, source)
 
   return {
-    id,
+    id: hashToPositiveInt(trackId),
     name,
     source,
-    track_id: trackKey || (input?.track_id ? String(input.track_id).trim() : undefined),
+    track_id: trackId,
     video_id: videoId || undefined,
     song_mid: songMid || undefined,
     album_mid: albumMid || undefined,
     artist: artist || undefined,
     album: album || undefined,
     artwork_url: artworkUrl || undefined,
-    webpage_url: webpageUrl || undefined,
-    description: description || undefined,
-    ar: normalizeArtistList(input, artist),
-    al: normalizeAlbum(input, album, artworkUrl),
-    dt,
+    webpage_url: getWebpageUrl(input, source) || undefined,
+    description: String(input?.description || input?.desc || '').trim() || undefined,
+    artists: artist ? [{ name: artist }] : undefined,
+    duration_ms: parseDurationMs(input?.duration_ms ?? input?.duration ?? input?.interval),
   }
 }
 
 function normalizePlaylist(input: any): FavoritePlaylist | null {
+  if (String(input?.source || '').trim().toLowerCase() !== 'qqmusic') return null
   const id = Number(input?.id)
-  if (!Number.isFinite(id) || id <= 0) return null
-
   const name = String(input?.name || '').trim()
-  if (!name) return null
+  if (!Number.isFinite(id) || id <= 0 || !name) return null
 
-  const coverImgUrl = input?.coverImgUrl ? String(input.coverImgUrl) : undefined
-  const picUrl = input?.picUrl ? String(input.picUrl) : undefined
-  const playCount = Number(input?.playCount)
-
-  const creator = input?.creator && typeof input.creator === 'object'
-    ? { nickname: input.creator.nickname ? String(input.creator.nickname) : undefined }
-    : undefined
-
+  const coverImgUrl = normalizeProtocolUrl(input?.coverImgUrl || input?.cover_url || input?.picUrl)
+  const playCount = Number(input?.playCount ?? input?.play_count)
+  const creator = String(input?.creator?.nickname || input?.creator || '').trim()
   return {
     id,
     name,
-    coverImgUrl,
-    picUrl,
+    source: 'qqmusic',
+    coverImgUrl: coverImgUrl || undefined,
     playCount: Number.isFinite(playCount) ? playCount : undefined,
-    creator,
+    creator: creator ? { nickname: creator } : undefined,
   }
 }
 
 function isSameFavoriteSong(a: any, b: any): boolean {
-  const keyA = buildFavoriteSongKey(a)
-  const keyB = buildFavoriteSongKey(b)
-  if (keyA && keyB) return keyA === keyB
-
-  const idA = Number(a?.id ?? a)
-  const idB = Number(b?.id ?? b)
-  return Number.isFinite(idA) && idA > 0 && idA === idB
+  const sourceA = inferSongSource(a)
+  const sourceB = inferSongSource(b)
+  if (!sourceA || !sourceB || sourceA !== sourceB) return false
+  const keyA = getSongKey(a, sourceA)
+  const keyB = getSongKey(b, sourceB)
+  return Boolean(keyA && keyB && keyA === keyB)
 }
 
 export function getFavoriteSongKey(songLike: any): string {
-  return buildFavoriteSongKey(songLike)
+  const source = inferSongSource(songLike)
+  return source ? getSongKey(songLike, source) : ''
 }
 
 export function getFavoriteSongs(): FavoriteSong[] {
-  const raw = localStorage.getItem(SONGS_KEY)
-  const arr = safeParseJson<any[]>(raw, [])
-  if (!Array.isArray(arr)) return []
-
-  return arr
+  const raw = safeParseJson<any[]>(localStorage.getItem(SONGS_KEY), [])
+  if (!Array.isArray(raw)) return []
+  return raw
     .map((item) => {
-      const normalized = normalizeSong(item)
-      if (!normalized) return null
+      const song = normalizeSong(item)
+      if (!song) return null
       const favAt = Number(item?._fav_at)
-      return {
-        ...normalized,
-        _fav_at: Number.isFinite(favAt) && favAt > 0 ? favAt : undefined,
-      }
+      const favorite: FavoriteSong = { ...song }
+      if (Number.isFinite(favAt) && favAt > 0) favorite._fav_at = favAt
+      return favorite
     })
     .filter((item): item is FavoriteSong => Boolean(item))
 }
@@ -365,20 +239,16 @@ export function isFavoriteSong(songLike: any): boolean {
 export function toggleFavoriteSong(songLike: any): boolean {
   const song = normalizeSong(songLike)
   if (!song) return false
-
   const list = getFavoriteSongs()
-  const idx = list.findIndex((item) => isSameFavoriteSong(item, song))
-
-  if (idx >= 0) {
-    list.splice(idx, 1)
+  const index = list.findIndex((item) => isSameFavoriteSong(item, song))
+  if (index >= 0) {
+    list.splice(index, 1)
     localStorage.setItem(SONGS_KEY, JSON.stringify(list))
     return false
   }
 
-  const now = Date.now()
-  const next: FavoriteSong = { ...song, _fav_at: now }
-  const out = [next, ...list]
-  localStorage.setItem(SONGS_KEY, JSON.stringify(out))
+  const next = { ...song, _fav_at: Date.now() }
+  localStorage.setItem(SONGS_KEY, JSON.stringify([next, ...list]))
   return true
 }
 
@@ -388,41 +258,43 @@ export function removeFavoriteSong(songLike: any): void {
 }
 
 export function getFavoritePlaylists(): FavoritePlaylist[] {
-  const raw = localStorage.getItem(PLAYLISTS_KEY)
-  const arr = safeParseJson<any[]>(raw, [])
-  if (!Array.isArray(arr)) return []
-  return arr.filter(Boolean)
+  const raw = safeParseJson<any[]>(localStorage.getItem(PLAYLISTS_KEY), [])
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((item) => {
+      const playlist = normalizePlaylist(item)
+      if (!playlist) return null
+      const favAt = Number(item?._fav_at)
+      const favorite: FavoritePlaylist = { ...playlist }
+      if (Number.isFinite(favAt) && favAt > 0) favorite._fav_at = favAt
+      return favorite
+    })
+    .filter((item): item is FavoritePlaylist => Boolean(item))
 }
 
 export function isFavoritePlaylist(playlistId: number | string): boolean {
   const id = Number(playlistId)
-  if (!Number.isFinite(id) || id <= 0) return false
-  return getFavoritePlaylists().some((playlist) => Number(playlist?.id) === id)
+  return Number.isFinite(id) && id > 0 && getFavoritePlaylists().some((playlist) => playlist.id === id)
 }
 
 export function toggleFavoritePlaylist(playlistLike: any): boolean {
   const playlist = normalizePlaylist(playlistLike)
   if (!playlist) return false
-
   const list = getFavoritePlaylists()
-  const idx = list.findIndex((item) => Number(item?.id) === playlist.id)
-
-  if (idx >= 0) {
-    list.splice(idx, 1)
+  const index = list.findIndex((item) => item.id === playlist.id)
+  if (index >= 0) {
+    list.splice(index, 1)
     localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(list))
     return false
   }
 
-  const now = Date.now()
-  const next: FavoritePlaylist = { ...playlist, _fav_at: now }
-  const out = [next, ...list]
-  localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(out))
+  const next = { ...playlist, _fav_at: Date.now() }
+  localStorage.setItem(PLAYLISTS_KEY, JSON.stringify([next, ...list]))
   return true
 }
 
 export function removeFavoritePlaylist(playlistId: number | string): void {
   const id = Number(playlistId)
   if (!Number.isFinite(id) || id <= 0) return
-  const list = getFavoritePlaylists().filter((playlist) => Number(playlist?.id) !== id)
-  localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(list))
+  localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(getFavoritePlaylists().filter((playlist) => playlist.id !== id)))
 }

@@ -60,6 +60,7 @@ async function loadPlaylists(cat: string = '热门') {
     const res = await apiGet<any>(`/qqmusic/search/playlists?keywords=${encodeURIComponent(query)}&limit=30&page=1`)
     playlists.value = (res?.playlists || []).map((playlist: any) => ({
       id: Number(playlist.id),
+      source: 'qqmusic',
       name: String(playlist.name || playlist.id),
       coverImgUrl: String(playlist.cover_url || ''),
       playCount: Number(playlist.play_count || 0),
@@ -346,7 +347,7 @@ onMounted(() => {
                 <button
                   class="absolute top-2 left-2 z-10 p-1.5 rounded-full backdrop-blur-md transition-colors"
                   :class="isLocalFavPlaylist(playlist.id) ? 'bg-pink-50 text-pink-600' : 'bg-black/40 text-white/90 hover:bg-pink-50 hover:text-pink-600'"
-                  @click.stop="toggleLocalFavPlaylist({ id: playlist.id, name: playlist.name, coverImgUrl: playlist.coverImgUrl, playCount: playlist.playCount, creator: playlist.creator })"
+                  @click.stop="toggleLocalFavPlaylist({ id: playlist.id, source: 'qqmusic', name: playlist.name, coverImgUrl: playlist.coverImgUrl, playCount: playlist.playCount, creator: playlist.creator })"
                   :title="isLocalFavPlaylist(playlist.id) ? '取消本地收藏' : '本地收藏'"
                 >
                   <Heart :size="14" :fill="isLocalFavPlaylist(playlist.id) ? 'currentColor' : 'none'" />
@@ -403,7 +404,7 @@ onMounted(() => {
                 <button
                   class="absolute top-2 left-2 z-10 p-1.5 rounded-full backdrop-blur-md transition-colors"
                   :class="isLocalFavPlaylist(playlist.id) ? 'bg-pink-50 text-pink-600' : 'bg-black/40 text-white/90 hover:bg-pink-50 hover:text-pink-600'"
-                  @click.stop="toggleLocalFavPlaylist({ id: playlist.id, name: playlist.name, picUrl: playlist.picUrl, playCount: playlist.playCount, creator: playlist.creator })"
+                  @click.stop="toggleLocalFavPlaylist({ id: playlist.id, source: 'qqmusic', name: playlist.name, picUrl: playlist.picUrl, playCount: playlist.playCount, creator: playlist.creator })"
                   :title="isLocalFavPlaylist(playlist.id) ? '取消本地收藏' : '本地收藏'"
                 >
                   <Heart :size="14" :fill="isLocalFavPlaylist(playlist.id) ? 'currentColor' : 'none'" />
@@ -454,7 +455,7 @@ onMounted(() => {
                 <button
                   class="absolute top-2 left-2 z-10 p-1.5 rounded-full backdrop-blur-md transition-colors"
                   :class="isLocalFavPlaylist(playlist.id) ? 'bg-pink-50 text-pink-600' : 'bg-black/40 text-white/90 hover:bg-pink-50 hover:text-pink-600'"
-                  @click.stop="toggleLocalFavPlaylist({ id: playlist.id, name: playlist.name, coverImgUrl: playlist.coverImgUrl, playCount: playlist.playCount, creator: playlist.creator })"
+                  @click.stop="toggleLocalFavPlaylist({ id: playlist.id, source: 'qqmusic', name: playlist.name, coverImgUrl: playlist.coverImgUrl, playCount: playlist.playCount, creator: playlist.creator })"
                   :title="isLocalFavPlaylist(playlist.id) ? '取消本地收藏' : '本地收藏'"
                 >
                   <Heart :size="14" :fill="isLocalFavPlaylist(playlist.id) ? 'currentColor' : 'none'" />

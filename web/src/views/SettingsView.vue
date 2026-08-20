@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Check, Eye, EyeOff, Image as ImageIcon, KeyRound, LogOut, RefreshCw, Save, ServerCog, Trash2, Upload } from 'lucide-vue-next'
+import { Check, Eye, EyeOff, HardDrive, Image as ImageIcon, KeyRound, LogOut, RefreshCw, Save, ServerCog, Trash2, Upload } from 'lucide-vue-next'
 import { apiDelete, apiGet, apiPut, apiPutFile, apiUrl } from '../api'
 import { logout } from '../auth'
 import { appConfig, loadAppBranding } from '../appConfig'
@@ -47,15 +47,45 @@ interface ManagedAsset {
   help: string
 }
 
+interface CacheStatus {
+  total_bytes: number
+  total_files: number
+  bilibili_audio: {
+    file_count: number
+    size_bytes: number
+  }
+  memory_entries: {
+    bilibili_view_summaries: number
+    bilibili_subtitles: number
+  }
+}
+
+interface CacheClearResult extends CacheStatus {
+  ok: boolean
+  removed_files: number
+  removed_bytes: number
+  skipped_files: number
+  skipped_bytes: number
+  cleared_memory_entries: number
+}
+
 const GROUPS = [
   ['web', 'Web 配置'],
   ['backend', 'Voice 服务'],
   ['music', '音乐接口配置'],
+  ['cache', '缓存'],
   ['authorization', '音乐会员登录'],
   ['teamspeak', 'TeamSpeak 配置'],
   ['serverquery', 'ServerQuery 兼容'],
   ['access', '外部 api'],
 ] as const
+
+const MUSIC_SETTING_KEYS = new Set([
+  'backend.bilibili_max_duration_minutes',
+  'backend.bilibili_audio_cache_ttl_hours',
+  'backend.bilibili_audio_cache_max_mb',
+  'backend.bilibili_audio_partial_ttl_minutes',
+])
 
 const GROUP_ALIASES: Record<string, string> = {
   description: 'teamspeak',
@@ -74,6 +104,10 @@ const assetBusy = ref<Record<string, boolean>>({})
 const loading = ref(true)
 const saving = ref(false)
 const applying = ref(false)
+const cacheLoading = ref(false)
+const cacheClearing = ref(false)
+const cacheStatus = ref<CacheStatus | null>(null)
+const cacheError = ref('')
 const error = ref('')
 const toastMessage = ref('')
 const toastType = ref<'success' | 'error' | 'info'>('info')
@@ -82,13 +116,17 @@ let waitGeneration = 0
 
 const activeFields = computed(() => payload.value?.fields.filter((field) => (
   field.group === activeGroup.value
-  && (appConfig.neteaseEnabled || field.key !== 'backend.netease_api_base')
+  && (field.group !== 'music' || MUSIC_SETTING_KEYS.has(field.key))
 )) || [])
 const activeAssets = computed(() => payload.value?.assets.filter((asset) => asset.group === activeGroup.value) || [])
 const activeNeedsVoiceRestart = computed(() => (
   activeFields.value.some((field) => field.restart === 'voice')
   || activeAssets.value.some((asset) => asset.restart === 'voice')
 ))
+const memoryCacheEntryCount = computed(() => {
+  const entries = cacheStatus.value?.memory_entries
+  return Number(entries?.bilibili_view_summaries || 0) + Number(entries?.bilibili_subtitles || 0)
+})
 
 function hydrate(result: SettingsPayload) {
   payload.value = result
@@ -110,6 +148,7 @@ async function load() {
   } finally {
     loading.value = false
   }
+  if (activeGroup.value === 'cache') await loadCacheStatus()
 }
 
 function showToast(message: string, type: 'success' | 'error' | 'info', duration = 4500) {
@@ -247,9 +286,54 @@ function clearSecret(field: SettingField) {
   field.configured = false
 }
 
+function formatBytes(value: unknown): string {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const size = bytes / (1024 ** index)
+  return `${size.toFixed(index === 0 || size >= 10 ? 0 : 1)} ${units[index]}`
+}
+
+async function loadCacheStatus() {
+  if (cacheClearing.value) return
+  cacheLoading.value = true
+  cacheError.value = ''
+  try {
+    cacheStatus.value = await apiGet<CacheStatus>('/admin/cache')
+  } catch (e: any) {
+    cacheError.value = String(e?.message || e)
+  } finally {
+    cacheLoading.value = false
+  }
+}
+
+async function clearCache() {
+  const usedSpace = formatBytes(cacheStatus.value?.total_bytes || 0)
+  const confirmed = window.confirm(
+    `确定清理缓存吗？\n\n将删除约 ${usedSpace} 的 B 站音频缓存和临时内存数据。正在播放或下载的音频会保留。`,
+  )
+  if (!confirmed) return
+
+  cacheClearing.value = true
+  cacheError.value = ''
+  try {
+    const result = await apiDelete<CacheClearResult>('/admin/cache')
+    cacheStatus.value = result
+    const retained = result.skipped_files > 0 ? `；保留 ${result.skipped_files} 个正在使用的文件` : ''
+    showToast(`已清理 ${result.removed_files} 个文件，释放 ${formatBytes(result.removed_bytes)}${retained}`, 'success')
+  } catch (e: any) {
+    cacheError.value = String(e?.message || e)
+    showToast(cacheError.value, 'error', 8000)
+  } finally {
+    cacheClearing.value = false
+  }
+}
+
 function selectGroup(group: string) {
   activeGroup.value = group
   error.value = ''
+  if (group === 'cache') void loadCacheStatus()
 }
 
 async function signOut() {
@@ -275,7 +359,7 @@ onBeforeUnmount(() => {
         <p class="text-sm text-gray-500 mt-1">运行配置与服务连接</p>
       </div>
       <div class="ml-auto flex flex-wrap items-center justify-end gap-2">
-        <template v-if="activeGroup !== 'authorization'">
+        <template v-if="activeGroup !== 'authorization' && activeGroup !== 'cache'">
           <button class="btn-secondary settings-header-action" type="button" :disabled="loading || saving || applying" @click="saveConfig">
             <Save :size="17" />
             {{ saving ? '正在保存' : '保存配置' }}
@@ -317,6 +401,57 @@ onBeforeUnmount(() => {
             </div>
 
             <CookieView v-if="activeGroup === 'authorization'" embedded />
+
+            <section v-if="activeGroup === 'cache'" class="theme-settings-panel bg-white border border-gray-200 rounded-lg overflow-hidden">
+              <div class="p-5 md:p-6">
+                <div class="flex flex-wrap items-start justify-between gap-4">
+                  <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                      <HardDrive :size="24" />
+                    </div>
+                    <div>
+                      <p class="text-sm text-gray-500">当前可清理缓存占用</p>
+                      <p class="text-3xl font-semibold text-gray-900 mt-1">
+                        {{ cacheLoading && !cacheStatus ? '--' : formatBytes(cacheStatus?.total_bytes) }}
+                      </p>
+                      <p class="text-xs text-gray-500 mt-1">{{ cacheStatus?.total_files ?? 0 }} 个 B 站音频缓存文件</p>
+                    </div>
+                  </div>
+                  <button type="button" class="btn-secondary" :disabled="cacheLoading || cacheClearing" @click="loadCacheStatus">
+                    <RefreshCw :size="17" :class="cacheLoading ? 'animate-spin' : ''" />
+                    刷新
+                  </button>
+                </div>
+
+                <div v-if="cacheError" class="mt-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {{ cacheError }}
+                </div>
+
+                <dl class="mt-6 divide-y divide-gray-100 border-y border-gray-100">
+                  <div class="flex items-center justify-between gap-4 py-3 text-sm">
+                    <dt class="text-gray-600">B 站音频缓存</dt>
+                    <dd class="text-right text-gray-900 font-medium">
+                      {{ formatBytes(cacheStatus?.bilibili_audio?.size_bytes) }}
+                      <span class="text-gray-500 font-normal">· {{ cacheStatus?.bilibili_audio?.file_count ?? 0 }} 个文件</span>
+                    </dd>
+                  </div>
+                  <div class="flex items-center justify-between gap-4 py-3 text-sm">
+                    <dt class="text-gray-600">临时内存缓存</dt>
+                    <dd class="text-right text-gray-900 font-medium">{{ memoryCacheEntryCount }} 项</dd>
+                  </div>
+                </dl>
+
+                <div class="mt-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <p class="text-xs leading-5 text-gray-500 max-w-xl">
+                    仅清理 B 站下载音频和临时内存数据；不会删除数据库、播放队列、历史记录、登录凭据、上传图片或日志。正在播放或下载的音频会保留。
+                  </p>
+                  <button type="button" class="btn-secondary text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700 shrink-0" :disabled="cacheLoading || cacheClearing" @click="clearCache">
+                    <Trash2 :size="17" />
+                    {{ cacheClearing ? '正在清理...' : '清理缓存' }}
+                  </button>
+                </div>
+              </div>
+            </section>
 
             <section v-if="activeAssets.length" class="theme-settings-panel bg-white border border-gray-200 rounded-lg divide-y divide-gray-100 mb-6">
               <div v-for="asset in activeAssets" :key="asset.key" class="p-4 md:p-5 grid md:grid-cols-[240px_minmax(0,1fr)] gap-3 md:gap-6 items-center">

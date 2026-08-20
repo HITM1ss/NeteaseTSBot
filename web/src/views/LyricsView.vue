@@ -27,15 +27,29 @@ const artist = ref<string>('')
 const album = ref<string>('')
 const isPlaying = ref<boolean>(false)
 const isLiked = ref<boolean>(false)
+const currentQueueTrack = ref<any>(null)
 const isShuffled = ref<boolean>(false)
 const repeatMode = ref<'none' | 'one' | 'all'>('none')
 
 let timer: number | null = null
 
+async function loadCurrentQueueTrack(queueItemId: number) {
+  if (!queueItemId) {
+    currentQueueTrack.value = null
+    return
+  }
+  const queue = await apiGet<any[]>('/queue')
+  currentQueueTrack.value = queue.find((item) => Number(item?.id) === queueItemId) || null
+}
+
 async function loadState() {
   try {
     const st = await apiGet<any>('/voice/status')
-    trackId.value = Number(st?.track_id ?? 0)
+    const nextTrackId = Number(st?.track_id ?? 0)
+    if (nextTrackId !== trackId.value) {
+      trackId.value = nextTrackId
+      await loadCurrentQueueTrack(nextTrackId)
+    }
     currentTime.value = Number(st?.current_time ?? 0)
     duration.value = Number(st?.duration ?? 0)
     artwork.value = String(st?.artwork_url || '')
@@ -45,7 +59,7 @@ async function loadState() {
     isPlaying.value = st?.state === 'playing'
     isShuffled.value = Boolean(st?.is_shuffled ?? false)
     repeatMode.value = st?.repeat_mode ?? 'none'
-    isLiked.value = isFavoriteSong(trackId.value)
+    isLiked.value = currentQueueTrack.value ? isFavoriteSong(currentQueueTrack.value) : false
   } catch {
     // ignore
   }
@@ -123,15 +137,18 @@ async function seekTo(event: MouseEvent) {
 }
 
 async function toggleLike() {
-  if (!trackId.value) return
+  if (!trackId.value || !currentQueueTrack.value) return
   const liked = toggleFavoriteSong({
-    id: trackId.value,
+    source: currentQueueTrack.value.source,
+    track_id: currentQueueTrack.value.track_id,
+    song_mid: currentQueueTrack.value.song_mid,
+    video_id: currentQueueTrack.value.video_id,
+    webpage_url: currentQueueTrack.value.webpage_url,
     name: title.value,
-    ar: [{ name: artist.value }],
-    al: {
-      name: album.value,
-      picUrl: artwork.value,
-    },
+    artist: artist.value,
+    album: album.value,
+    artwork_url: artwork.value,
+    duration_ms: duration.value * 1000,
   })
   isLiked.value = liked
 }

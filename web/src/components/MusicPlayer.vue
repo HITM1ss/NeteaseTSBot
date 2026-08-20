@@ -237,26 +237,6 @@
                 <input type="checkbox" :checked="fxSwapLr" @change="onFxSwapChange(($event.target as HTMLInputElement).checked)" />
               </label>
 
-              <!-- Netease Quality Setting -->
-              <div v-if="appConfig.neteaseEnabled" class="pt-2 border-t border-gray-100">
-                <div class="text-xs font-semibold uppercase tracking-[0.24em] text-gray-400 mb-2">网易云默认音质</div>
-                <div class="grid grid-cols-2 gap-2">
-                  <button
-                    v-for="option in NETEASE_QUALITY_OPTIONS"
-                    :key="option.value"
-                    @click="updateNeteaseQuality(option.value)"
-                    :class="[
-                      'px-2 py-1.5 text-[11px] font-medium rounded-lg transition-all duration-200 border text-center',
-                      neteaseQuality === option.value
-                        ? 'bg-blue-50 border-blue-200 text-blue-600 shadow-sm'
-                        : 'bg-white border-gray-100 text-gray-600 hover:border-gray-300'
-                    ]"
-                  >
-                    {{ option.label }}
-                  </button>
-                </div>
-              </div>
-
               <div class="flex items-center justify-end gap-2 pt-2">
                 <button
                   class="px-3 py-1.5 text-sm rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700"
@@ -297,25 +277,19 @@ import {
   Heart,
   MoreHorizontal,
   Maximize2,
-  SlidersHorizontal,
-  Check,
-  ChevronDown,
 } from 'lucide-vue-next'
 import { apiGet, apiPost, apiPut } from '../api'
-import { appConfig } from '../appConfig'
 import { isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
-import {
-  NETEASE_QUALITY_OPTIONS,
-  getNeteaseQualityLabel,
-  getNeteaseQualityLevel,
-  setNeteaseQualityLevel,
-  type NeteaseQualityLevel,
-} from '../utils/neteaseQuality'
 
 const router = useRouter()
 
 interface Track {
   id: number
+  track_id?: string
+  source?: 'qqmusic' | 'bilibili'
+  song_mid?: string
+  video_id?: string
+  webpage_url?: string
   title: string
   artist: string
   album?: string
@@ -355,9 +329,6 @@ const isLiked = ref(false)
 const queue = ref<Track[]>([])
 const currentTrackIndex = ref(-1)
 const shuffledQueue = ref<number[]>([])
-const neteaseQuality = ref<NeteaseQualityLevel>(getNeteaseQualityLevel())
-const showQualityMenu = ref(false)
-const qualityMenuRef = ref<HTMLElement | null>(null)
 
 const showFxPanel = ref(false)
 const fxLoading = ref(false)
@@ -409,16 +380,6 @@ const playbackModeIcon = computed(() => {
       return ListMusic
   }
 })
-const neteaseQualityButtonLabel = computed(() => {
-  const label = getNeteaseQualityLabel(neteaseQuality.value)
-  if (label === '自动最高') return '自动'
-  if (label === '高清环绕声') return '环绕'
-  if (label === '沉浸环绕声') return '沉浸'
-  if (label === '杜比全景声') return '杜比'
-  if (label === '超清母带') return '母带'
-  return label
-})
-
 // Format time in MM:SS format
 function formatTime(seconds: number): string {
   if (!seconds || isNaN(seconds)) return '0:00'
@@ -631,23 +592,6 @@ async function cyclePlaybackMode() {
   await setPlaybackMode(nextMode)
 }
 
-function toggleQualityMenu() {
-  showQualityMenu.value = !showQualityMenu.value
-}
-
-function updateNeteaseQuality(value: NeteaseQualityLevel) {
-  neteaseQuality.value = setNeteaseQualityLevel(value)
-  showQualityMenu.value = false
-}
-
-function handleDocumentPointerDown(event: PointerEvent) {
-  if (!showQualityMenu.value) return
-  const target = event.target as Node | null
-  if (!target) return
-  if (qualityMenuRef.value?.contains(target)) return
-  showQualityMenu.value = false
-}
-
 function generateShuffledQueue() {
   if (queue.value.length === 0) return
   
@@ -669,6 +613,19 @@ async function loadQueue() {
     queue.value = await apiGet<Track[]>('/queue')
     if (currentTrack.value) {
       currentTrackIndex.value = queue.value.findIndex(t => t.id === currentTrack.value?.id)
+      const matchedTrack = queue.value.find((track) => track.id === currentTrack.value?.id)
+      if (matchedTrack) {
+        currentTrack.value = {
+          ...matchedTrack,
+          ...currentTrack.value,
+          track_id: matchedTrack.track_id,
+          source: matchedTrack.source,
+          song_mid: matchedTrack.song_mid,
+          video_id: matchedTrack.video_id,
+          webpage_url: matchedTrack.webpage_url,
+        }
+        isLiked.value = isFavoriteSong(currentTrack.value)
+      }
     }
   } catch (e: any) {
     // Silent fail for queue loading
@@ -676,15 +633,18 @@ async function loadQueue() {
 }
 
 async function toggleLike() {
-  if (!currentTrack.value) return
+  if (!currentTrack.value?.track_id) return
   const liked = toggleFavoriteSong({
-    id: currentTrack.value.id,
+    source: currentTrack.value.source,
+    track_id: currentTrack.value.track_id,
+    song_mid: currentTrack.value.song_mid,
+    video_id: currentTrack.value.video_id,
+    webpage_url: currentTrack.value.webpage_url,
     name: currentTrack.value.title,
-    ar: [{ name: currentTrack.value.artist }],
-    al: {
-      name: currentTrack.value.album,
-      picUrl: currentTrack.value.artwork,
-    },
+    artist: currentTrack.value.artist,
+    album: currentTrack.value.album,
+    artwork_url: currentTrack.value.artwork,
+    duration_ms: playerState.value.duration * 1000,
   })
   isLiked.value = liked
 }
@@ -707,8 +667,6 @@ async function loadPlayerState() {
     // Check if track changed to update local like status
     const nextTrackId = Number(state.track_id || 0)
     if (nextTrackId && nextTrackId !== currentTrack.value?.id) {
-      isLiked.value = isFavoriteSong(nextTrackId)
-
       // Update current track index when track changes
       if (queue.value.length > 0) {
         currentTrackIndex.value = queue.value.findIndex(t => t.id === nextTrackId)
@@ -716,15 +674,23 @@ async function loadPlayerState() {
     }
 
     if (state.now_playing_title) {
+      const matchedTrack = queue.value.find((track) => track.id === nextTrackId)
       currentTrack.value = {
-        id: state.track_id || 0,
+        id: nextTrackId,
+        track_id: matchedTrack?.track_id,
+        source: matchedTrack?.source,
+        song_mid: matchedTrack?.song_mid,
+        video_id: matchedTrack?.video_id,
+        webpage_url: matchedTrack?.webpage_url,
         title: state.now_playing_title,
         artist: state.now_playing_artist || 'Unknown Artist',
         album: state.now_playing_album,
         artwork: state.artwork_url
       }
 
-      isLiked.value = isFavoriteSong(Number(currentTrack.value.id || 0))
+      isLiked.value = isFavoriteSong(currentTrack.value)
+    } else {
+      isLiked.value = false
     }
     
     // Handle track end and repeat logic
@@ -799,14 +765,12 @@ function handleProgressClick(event: MouseEvent) {
 onMounted(() => {
   void loadPlayerState()
   void loadQueue()
-  document.addEventListener('pointerdown', handleDocumentPointerDown)
   timer = window.setInterval(() => {
     void loadPlayerState()
   }, pollInterval)
 })
 
 onUnmounted(() => {
-  document.removeEventListener('pointerdown', handleDocumentPointerDown)
   if (timer) {
     clearInterval(timer)
     timer = null

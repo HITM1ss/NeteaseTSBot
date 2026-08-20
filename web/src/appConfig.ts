@@ -15,7 +15,6 @@ export const appConfig = reactive({
   iconHref: readString('VITE_WEB_APP_ICON', ''),
   publicUrl: readString('VITE_WEB_PUBLIC_URL', ''),
   logLevel: readString('VITE_LOG_LEVEL', 'INFO'),
-  neteaseEnabled: false,
 })
 
 export async function loadAppBranding(): Promise<void> {
@@ -32,7 +31,6 @@ export async function loadAppBranding(): Promise<void> {
           : config.app_icon
       }
       if (typeof config?.log_level === 'string' && config.log_level) appConfig.logLevel = config.log_level
-      if (typeof config?.netease_enabled === 'boolean') appConfig.neteaseEnabled = config.netease_enabled
     }
   } catch {
   }

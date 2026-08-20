@@ -8,12 +8,12 @@ A modern Vue.js frontend for the TSBot music player with comprehensive music man
 - 🎤 **Lyrics Display**: Real-time synchronized lyrics display
 - 📱 **Responsive Design**: Mobile-first design that works on all devices
 - 🎨 **Beautiful UI**: Modern interface built with TailwindCSS and Lucide icons
-- 🔍 **Music Search**: Search and discover music from NetEase Cloud Music
+- 🔍 **Music Search**: Search and discover QQ Music songs and Bilibili videos
 - 📋 **Playlist Management**: Drag-and-drop playlist organization
 - ❤️ **Favorites**: Manage your liked songs
 - 📚 **Music Library**: Browse your playlists and music collection
 - 📈 **Play History**: Track your listening history
-- ⚙️ **Settings**: Configure NetEase Cloud Music cookies
+- ⚙️ **Settings**: Configure QQ Music and Bilibili authorization
 
 ## Technology Stack
 
@@ -74,7 +74,6 @@ web/
 │   ├── views/              # Page components
 │   │   ├── SearchView.vue  # Music search page
 │   │   ├── QueueView.vue   # Playback queue
-│   │   ├── LikesView.vue   # Liked songs
 │   │   ├── PlaylistsView.vue # User playlists
 │   │   ├── HistoryView.vue # Play history
 │   │   └── CookieView.vue  # Settings page
@@ -120,24 +119,22 @@ Enhanced playlist management with:
 The frontend communicates with the TSBot backend through REST APIs:
 
 - `GET /queue` - Get current playback queue
-- `POST /queue/netease` - Add NetEase song to queue
-- `GET /search` - Search for music
+- `POST /queue/qqmusic` - Add a QQ Music song to the queue
+- `POST /queue/bilibili` - Add a Bilibili video to the queue
+- `GET /qqmusic/search/songs` - Search QQ Music
+- `GET /bilibili/search/videos` - Search Bilibili videos
 - `GET /voice/status` - Get player status
 - `POST /voice/play` - Control playback
-- `GET /netease/playlists` - Get user playlists
-- `GET /netease/likes` - Get liked songs
+- `GET /lyrics/{queueItemId}` - Get lyrics for the queued media
 
 ## Configuration
 
-### NetEase Cloud Music Integration
-To use NetEase Cloud Music features:
+### Music Authorization
+To authorize protected music sources:
 
-1. Go to the Settings page (`/cookie`)
-2. Enter your NetEase Cloud Music cookie
-3. The cookie is stored locally and used for:
-   - Accessing your playlists
-   - Viewing liked songs
-   - Getting high-quality audio streams
+1. Go to the Settings page (`/settings?group=authorization`)
+2. Scan the QR code or enter a QQ Music or Bilibili cookie
+3. The credential is encrypted and stored server-side for playback or source-specific requests
 
 ### Customization
 
@@ -180,10 +177,10 @@ The app uses TailwindCSS for styling. You can customize:
    - If you bypass same-origin proxying, point `VITE_API_BASE` or `TSBOT_WEB_API_PROXY_TARGET` at the correct backend
    - If you access Vite through a domain, whitelist it via `TSBOT_WEB_ALLOWED_HOSTS`
 
-2. **NetEase Features Not Working**
-   - Verify cookie is correctly set in Settings
-   - Check cookie format and validity
-   - Ensure backend has NetEase integration enabled
+2. **Music Authorization Not Working**
+   - Refresh the authorization status in Settings
+   - Scan a new QR code or verify the cookie format and validity
+   - Check the backend log for the upstream source response
 
 3. **Styling Issues**
    - Run `npm run build` to ensure Tailwind is processed

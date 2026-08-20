@@ -237,6 +237,11 @@ import { useTransientMessage } from '../composables/useTransientMessage'
 
 interface Track {
   id: number
+  track_id?: string
+  source?: 'qqmusic' | 'bilibili'
+  song_mid?: string
+  video_id?: string
+  webpage_url?: string
   title: string
   artist: string
   album?: string
@@ -273,7 +278,7 @@ async function loadTracks() {
   error.value = ''
   
   try {
-    const next = await apiGet<Track[]>('/queue')
+    const next = (await apiGet<Track[]>('/queue')).filter(isSupportedTrack)
     applyQueueUpdate(markQueueFavorites(next))
   } catch (e: any) {
     error.value = String(e?.message ?? e)
@@ -287,6 +292,10 @@ function markQueueFavorites(list: Track[]): Track[] {
     ...t,
     isLiked: isFavoriteSong(t.id),
   }))
+}
+
+function isSupportedTrack(track: Track): boolean {
+  return track.source === 'qqmusic' || track.source === 'bilibili'
 }
 
 function applyQueueUpdate(next: Track[]) {
@@ -311,7 +320,7 @@ function applyQueueUpdate(next: Track[]) {
 
 async function refreshTracksSilently() {
   try {
-    const next = await apiGet<Track[]>('/queue')
+    const next = (await apiGet<Track[]>('/queue')).filter(isSupportedTrack)
     applyQueueUpdate(markQueueFavorites(next))
   } catch {
     // ignore
@@ -386,14 +395,16 @@ async function clearAllTracks() {
 // Toggle track like status
 async function toggleLike(track: Track) {
   const liked = toggleFavoriteSong({
-    id: track.id,
+    source: track.source,
+    track_id: track.track_id,
+    song_mid: track.song_mid,
+    video_id: track.video_id,
+    webpage_url: track.webpage_url,
     name: track.title,
-    ar: [{ name: track.artist }],
-    al: {
-      name: track.album,
-      picUrl: track.artwork,
-    },
-    duration: track.duration ? Number(track.duration) * 1000 : undefined,
+    artist: track.artist,
+    album: track.album,
+    artwork_url: track.artwork,
+    duration_ms: track.duration ? Number(track.duration) * 1000 : undefined,
   })
   track.isLiked = liked
 }

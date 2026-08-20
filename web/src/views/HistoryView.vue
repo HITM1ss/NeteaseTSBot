@@ -31,7 +31,7 @@ async function load() {
   error.value = ''
   
   try {
-    history.value = await apiGet<any[]>('/history')
+    history.value = (await apiGet<any[]>('/history')).filter(isSupportedTrack)
   } catch (e: any) {
     error.value = String(e?.message ?? e)
   } finally {
@@ -84,6 +84,10 @@ function getRelativeTime(dateString: string): string {
 
 function isBilibiliTrack(track: any): boolean {
   return String(track?.track_id || '').startsWith('bilibili:')
+}
+
+function isSupportedTrack(track: any): boolean {
+  return track?.source === 'qqmusic' || track?.source === 'bilibili'
 }
 
 function getTrackArtwork(track: any): string {

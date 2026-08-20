@@ -55,6 +55,7 @@ function togglePlaylist() {
   if (!playlist.value) return
   toggleFavoritePlaylist({
     id: playlist.value.id,
+    source: 'qqmusic',
     name: playlist.value.name,
     coverImgUrl: playlist.value.coverImgUrl,
     playCount: playlist.value.playCount,

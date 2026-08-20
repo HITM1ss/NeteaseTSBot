@@ -13,9 +13,7 @@ import {
 import EmptyState from '../components/EmptyState.vue'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
 import { apiPost } from '../api'
-import { appConfig } from '../appConfig'
 import { useTransientMessage } from '../composables/useTransientMessage'
-import { buildNeteaseQueuePayload } from '../utils/queue'
 import {
   getFavoriteSongKey,
   getFavoritePlaylists,
@@ -66,15 +64,15 @@ function isQQMusicSong(song: FavoriteSong): boolean {
 
 function getSongArtists(song: FavoriteSong): string {
   if (song.artist) return song.artist
-  return (song.ar || []).map((artist) => artist.name).join(', ')
+  return (song.artists || []).map((artist) => artist.name).join(', ')
 }
 
 function getSongAlbum(song: FavoriteSong): string {
-  return song.album || song.al?.name || ''
+  return song.album || ''
 }
 
 function getSongArtwork(song: FavoriteSong): string {
-  return song.artwork_url || song.al?.picUrl || ''
+  return song.artwork_url || ''
 }
 
 function getSongWebpageUrl(song: FavoriteSong): string {
@@ -83,8 +81,7 @@ function getSongWebpageUrl(song: FavoriteSong): string {
 
 function getSongSourceLabel(song: FavoriteSong): string {
   if (isBilibiliSong(song)) return 'B站'
-  if (isQQMusicSong(song)) return 'QQ音乐'
-  return '网易云（已禁用）'
+  return 'QQ音乐'
 }
 
 function getBilibiliVideoId(song: FavoriteSong): string {
@@ -110,7 +107,7 @@ async function playSong(song: FavoriteSong) {
         album: getSongAlbum(song),
         play_now: true,
         cover_url: getSongArtwork(song),
-        duration_ms: song.dt,
+        duration_ms: song.duration_ms,
       })
       return
     }
@@ -123,13 +120,11 @@ async function playSong(song: FavoriteSong) {
         play_now: true,
         quality: '320',
         album_mid: String(song.album_mid || ''),
-        duration_ms: song.dt,
+        duration_ms: song.duration_ms,
       })
       return
     }
-
-    if (!appConfig.neteaseEnabled) throw new Error('网易云功能已禁用')
-    await apiPost('/queue/netease', buildNeteaseQueuePayload(song, true))
+    throw new Error('不支持的音乐来源')
   } catch (e: any) {
     const msg = String(e?.message ?? e)
     showActionError(`点歌失败: ${msg}`)
@@ -151,7 +146,7 @@ async function addToQueue(song: FavoriteSong) {
         album: getSongAlbum(song),
         play_now: false,
         cover_url: getSongArtwork(song),
-        duration_ms: song.dt,
+        duration_ms: song.duration_ms,
       })
       return
     }
@@ -164,13 +159,11 @@ async function addToQueue(song: FavoriteSong) {
         play_now: false,
         quality: '320',
         album_mid: String(song.album_mid || ''),
-        duration_ms: song.dt,
+        duration_ms: song.duration_ms,
       })
       return
     }
-
-    if (!appConfig.neteaseEnabled) throw new Error('网易云功能已禁用')
-    await apiPost('/queue/netease', buildNeteaseQueuePayload(song, false))
+    throw new Error('不支持的音乐来源')
   } catch (e: any) {
     const msg = String(e?.message ?? e)
     showActionError(`添加到队列失败: ${msg}`)
@@ -299,7 +292,7 @@ onMounted(refresh)
                   <div class="truncate max-w-[150px]">{{ getSongAlbum(song) }}</div>
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right text-sm text-gray-400 font-mono tabular-nums">
-                  {{ formatDuration(song.dt) }}
+                  {{ formatDuration(song.duration_ms) }}
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right">
                   <div class="flex items-center justify-end gap-2 md:opacity-0 group-hover:opacity-100 transition-all duration-200">
@@ -372,8 +365,8 @@ onMounted(refresh)
               @click="openPlaylist(pl)"
             >
               <img
-                v-if="pl.coverImgUrl || pl.picUrl"
-                :src="(pl.coverImgUrl || pl.picUrl) + '?param=300y300'"
+                v-if="pl.coverImgUrl"
+                :src="pl.coverImgUrl"
                 :alt="pl.name"
                 class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
               />

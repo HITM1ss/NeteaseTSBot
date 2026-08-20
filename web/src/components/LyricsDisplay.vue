@@ -48,29 +48,8 @@ async function loadLyrics(trackId: number | string) {
   error.value = ''
   
   try {
-    let response: any
-    
-    // Detect platform based on trackId format
-    if (typeof trackId === 'string' && (trackId.startsWith('qqmusic:') || trackId.includes('qqmusic'))) {
-      // QQ Music track
-      const songMid = trackId.replace('qqmusic:', '')
-      const qqResponse = await apiGet<{ lyric: any }>(`/qqmusic/song/${songMid}/lyric?parse=true`)
-      
-      // Convert QQ Music lyric format to our format
-      if (qqResponse.lyric && qqResponse.lyric.lyric) {
-        lyrics.value = qqResponse.lyric.lyric.map((line: any) => ({
-          time: parseTimeToMs(line.time),
-          text: line.lyric || ''
-        })).filter((line: LyricLine) => line.text.trim())
-      } else {
-        lyrics.value = []
-      }
-    } else {
-      // Netease track (legacy format)
-      const numericId = typeof trackId === 'string' ? trackId.replace('netease:', '') : trackId
-      response = await apiGet<{ lyrics: LyricLine[] }>(`/lyrics/${numericId}`)
-      lyrics.value = response.lyrics || []
-    }
+    const response = await apiGet<{ lyrics: LyricLine[] }>(`/lyrics/${trackId}`)
+    lyrics.value = response.lyrics || []
   } catch (e: any) {
     error.value = String(e?.message ?? e)
     lyrics.value = []
@@ -79,19 +58,6 @@ async function loadLyrics(trackId: number | string) {
   }
 }
 
-// Helper function to parse time string to milliseconds
-function parseTimeToMs(timeStr: string): number {
-  if (!timeStr) return 0
-  
-  // Parse time format like "00:30.50" or "01:23.45"
-  const parts = timeStr.split(':')
-  if (parts.length !== 2) return 0
-  
-  const minutes = parseInt(parts[0], 10) || 0
-  const seconds = parseFloat(parts[1]) || 0
-  
-  return (minutes * 60 + seconds) * 1000
-}
 // Auto-scroll to current line
 function scrollToCurrentLine() {
   if (currentLineIndex.value >= 0 && lyricsContainer.value && !isUserScrolling.value) {

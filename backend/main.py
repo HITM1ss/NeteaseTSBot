@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .bilibili_cache import prune_audio_cache
+from .bilibili_cache import audio_cache_usage, clear_audio_cache, prune_audio_cache
 from .bilibili_auth import (
     close_all_bilibili_qr_sessions,
     cookie_string_to_dict,
@@ -2294,6 +2294,51 @@ def _get_yt_dlp_module():
     except ImportError as exc:
         raise HTTPException(status_code=500, detail="yt-dlp is not installed on backend") from exc
     return yt_dlp
+
+
+def _bilibili_cache_protected_paths() -> set[Path]:
+    """Keep the currently playing or downloading Bilibili audio available."""
+    protected: set[Path] = set()
+    cache_root = BILIBILI_AUDIO_DIR.resolve(strict=False)
+
+    current_source = _current_source_url.strip()
+    if current_source:
+        try:
+            current_path = Path(current_source).resolve(strict=False)
+            if current_path.is_relative_to(cache_root):
+                protected.add(current_path)
+        except OSError:
+            pass
+
+    for video_id, lock in list(_bilibili_download_locks.items()):
+        if not lock.locked():
+            continue
+        try:
+            protected.update(
+                path.resolve(strict=False)
+                for path in BILIBILI_AUDIO_DIR.glob(f"{video_id}.*")
+                if path.is_file()
+            )
+        except OSError:
+            continue
+
+    return protected
+
+
+def _cache_status_payload() -> dict:
+    usage = audio_cache_usage(BILIBILI_AUDIO_DIR)
+    return {
+        "total_bytes": usage.total_bytes,
+        "total_files": usage.file_count,
+        "bilibili_audio": {
+            "file_count": usage.file_count,
+            "size_bytes": usage.total_bytes,
+        },
+        "memory_entries": {
+            "bilibili_view_summaries": len(_bilibili_view_summary_cache),
+            "bilibili_subtitles": len(_bilibili_subtitle_cache),
+        },
+    }
 
 
 def _find_cached_bilibili_audio(video_id: str) -> str:
@@ -4593,6 +4638,45 @@ def auth_logout(request: Request, response: Response, session: Session = Depends
 def admin_settings(request: Request, session: Session = Depends(get_session)) -> dict:
     require_admin(request, session)
     return settings_payload(session)
+
+
+@app.get("/admin/cache")
+def admin_cache_status(request: Request, session: Session = Depends(get_session)) -> dict:
+    require_admin(request, session)
+    return _cache_status_payload()
+
+
+@app.delete("/admin/cache")
+def admin_clear_cache(request: Request, session: Session = Depends(get_session)) -> dict:
+    _, admin_session = require_admin(request, session)
+    require_csrf(request, admin_session)
+
+    result = clear_audio_cache(
+        BILIBILI_AUDIO_DIR,
+        protected_paths=_bilibili_cache_protected_paths(),
+    )
+    cleared_memory_entries = len(_bilibili_view_summary_cache) + len(_bilibili_subtitle_cache)
+    _bilibili_view_summary_cache.clear()
+    _bilibili_subtitle_cache.clear()
+
+    if result.removed_files or cleared_memory_entries:
+        logger.info(
+            "cleared Bilibili cache: %s files (%s bytes), retained %s active files, cleared %s memory entries",
+            result.removed_files,
+            result.removed_bytes,
+            result.skipped_files,
+            cleared_memory_entries,
+        )
+
+    return {
+        "ok": True,
+        "removed_files": result.removed_files,
+        "removed_bytes": result.removed_bytes,
+        "skipped_files": result.skipped_files,
+        "skipped_bytes": result.skipped_bytes,
+        "cleared_memory_entries": cleared_memory_entries,
+        **_cache_status_payload(),
+    }
 
 
 @app.put("/admin/settings")

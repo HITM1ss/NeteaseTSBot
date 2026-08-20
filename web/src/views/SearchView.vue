@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, ref } from 'vue'
 import { apiGet, apiPost } from '../api'
-import { appConfig } from '../appConfig'
 import { 
   Search, 
   Play, 
@@ -22,7 +21,6 @@ import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
 import { getFavoriteSongKey, getFavoriteSongs, isFavoriteSong, toggleFavoriteSong } from '../utils/favorites'
-import { buildNeteaseQueuePayload } from '../utils/queue'
 import { useTransientMessage } from '../composables/useTransientMessage'
 
 const keywords = ref('')
@@ -30,12 +28,8 @@ const error = ref('')
 const status = ref('')
 const songs = ref<any[]>([])
 const loading = ref(false)
-const suggestions = ref<string[]>([])
-const hotSearches = ref<any[]>([])
-const showSuggestions = ref(false)
 const isSearchFocused = ref(false)
-const defaultKeyword = ref('')
-const selectedPlatform = ref<'netease' | 'qqmusic' | 'bilibili'>('qqmusic')
+const selectedPlatform = ref<'qqmusic' | 'bilibili'>('qqmusic')
 const qqMusicConfigured = ref(false)
 const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
@@ -109,9 +103,6 @@ function clearSearchHistory() {
 }
 
 async function search(isLoadMore = false) {
-  if (!appConfig.neteaseEnabled && selectedPlatform.value === 'netease') {
-    selectedPlatform.value = 'qqmusic'
-  }
   if (!keywords.value.trim()) return
   
   if (!isLoadMore) {
@@ -128,8 +119,6 @@ async function search(isLoadMore = false) {
     currentPage.value++
   }
   
-  showSuggestions.value = false
-  
   try {
     if (selectedPlatform.value === 'bilibili') {
       const res = await apiGet<{ items: any[]; has_more: boolean }>(`/bilibili/search/videos?keywords=${encodeURIComponent(keywords.value)}&limit=${pageSize.value}&page=${currentPage.value}`)
@@ -142,7 +131,7 @@ async function search(isLoadMore = false) {
       }
 
       hasMore.value = !!res?.has_more
-    } else if (selectedPlatform.value === 'qqmusic') {
+    } else {
       const res = await apiGet<{ songs: any[] }>(`/qqmusic/search/songs?keywords=${encodeURIComponent(keywords.value)}&limit=${pageSize.value}&page=${currentPage.value}`)
       const newSongs = res?.songs || []
       
@@ -152,22 +141,7 @@ async function search(isLoadMore = false) {
         songs.value = newSongs
       }
       
-      // QQ音乐判断是否还有更多
       hasMore.value = newSongs.length === pageSize.value
-    } else {
-      const offset = (currentPage.value - 1) * pageSize.value
-      const res = await apiGet<{ raw: any }>(`/search?keywords=${encodeURIComponent(keywords.value)}&limit=${pageSize.value}&offset=${offset}`)
-      const newSongs = res?.raw?.result?.songs || []
-      
-      if (isLoadMore) {
-        songs.value = [...songs.value, ...newSongs]
-      } else {
-        songs.value = newSongs
-      }
-      
-      // 网易云音乐判断是否还有更多
-      const total = res?.raw?.result?.songCount || 0
-      hasMore.value = songs.value.length < total && newSongs.length === pageSize.value
     }
   } catch (e: any) {
     error.value = String(e?.message ?? e)
@@ -186,64 +160,8 @@ async function loadMore() {
   await search(true)
 }
 
-async function getSuggestions() {
-  if (!appConfig.neteaseEnabled || selectedPlatform.value !== 'netease') {
-    suggestions.value = []
-    showSuggestions.value = false
-    return
-  }
-
-  if (!keywords.value.trim()) {
-    suggestions.value = []
-    showSuggestions.value = false
-    return
-  }
-  
-  try {
-    const res = await apiGet<any>(`/netease/search/suggest?keywords=${encodeURIComponent(keywords.value)}`)
-    const suggests = res?.result?.allMatch || []
-    suggestions.value = suggests.map((item: any) => item.keyword || item.name || item).slice(0, 8)
-    showSuggestions.value = suggestions.value.length > 0
-  } catch (e) {
-    suggestions.value = []
-    showSuggestions.value = false
-  }
-}
-
-async function loadHotSearches() {
-  if (!appConfig.neteaseEnabled) {
-    hotSearches.value = []
-    return
-  }
-  try {
-    const res = await apiGet<any>('/netease/search/hot')
-    hotSearches.value = res?.result?.hots || []
-  } catch (e) {
-    hotSearches.value = []
-  }
-}
-
-async function loadDefaultKeyword() {
-  if (!appConfig.neteaseEnabled) {
-    defaultKeyword.value = ''
-    return
-  }
-  try {
-    const res = await apiGet<any>('/netease/search/default')
-    defaultKeyword.value = res?.data?.showKeyword || res?.data?.realkeyword || ''
-  } catch (e) {
-    defaultKeyword.value = ''
-  }
-}
-
 function selectSuggestion(suggestion: string) {
   keywords.value = suggestion
-  showSuggestions.value = false
-  search()
-}
-
-function selectHotSearch(hotItem: any) {
-  keywords.value = hotItem.first || hotItem.keyword || hotItem
   search()
 }
 
@@ -267,7 +185,7 @@ async function enqueue(song: any, playNow: boolean) {
         duration_ms: getSongDurationMs(song),
       })
       status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
-    } else if (selectedPlatform.value === 'qqmusic') {
+    } else {
       const res = await apiPost<{ ok: boolean; id: number; source_url: string }>('/queue/qqmusic', {
         song_mid: String(song.mid || song.songmid || song.song_mid),
         title: getSongTitle(song),
@@ -278,14 +196,6 @@ async function enqueue(song: any, playNow: boolean) {
         album_mid: String(song.album?.mid || song.albummid || ""),
         cover_url: getSongArtwork(song),
         duration_ms: getSongDurationMs(song),
-      })
-      status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
-    } else {
-      if (!appConfig.neteaseEnabled) {
-        throw new Error('网易云功能已禁用')
-      }
-      const res = await apiPost<{ ok: boolean; id: number; source_url: string }>('/queue/netease', {
-        ...buildNeteaseQueuePayload(song, playNow),
       })
       status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
     }
@@ -367,7 +277,7 @@ function getSongArtist(song: any): string {
   if (selectedPlatform.value === 'bilibili') {
     return String(song?.artist || song?.author || song?.owner?.name || '').trim()
   }
-  return ((song?.ar || song?.artists) || []).map((a: any) => a?.name).filter(Boolean).join(', ')
+  return ''
 }
 
 function getSongAlbum(song: any): string {
@@ -377,7 +287,7 @@ function getSongAlbum(song: any): string {
   if (selectedPlatform.value === 'bilibili') {
     return String(song?.album || song?.typename || '').trim()
   }
-  return String(song?.al?.name || song?.album?.name || '').trim()
+  return ''
 }
 
 function getSongArtwork(song: any): string {
@@ -391,8 +301,7 @@ function getSongArtwork(song: any): string {
     if (raw.startsWith('//')) return `https:${raw}`
     return raw
   }
-  const raw = String(song?.al?.picUrl || song?.album?.picUrl || song?.artists?.[0]?.img1v1Url || '').trim()
-  return raw ? `${raw}?param=100y100` : ''
+  return ''
 }
 
 function getSongDescription(song: any): string {
@@ -460,7 +369,7 @@ function getSongDurationMs(song: any): number | undefined {
   if (selectedPlatform.value === 'bilibili') {
     return parseDurationToMs(song?.duration_ms ?? song?.duration)
   }
-  return parseDurationToMs(song?.dt ?? song?.duration)
+  return undefined
 }
 
 function formatSongDuration(song: any): string {
@@ -475,7 +384,7 @@ function getSearchPlaceholder(): string {
   if (selectedPlatform.value === 'qqmusic') {
     return '搜索QQ音乐歌曲、歌手或专辑...'
   }
-  return defaultKeyword.value ? `试试搜索: ${defaultKeyword.value}` : '搜索歌曲、艺术家或专辑...'
+  return '搜索QQ音乐歌曲、歌手或专辑...'
 }
 
 function handleKeyPress(event: KeyboardEvent) {
@@ -484,15 +393,8 @@ function handleKeyPress(event: KeyboardEvent) {
   }
 }
 
-function handleInput() {
-  getSuggestions()
-}
-
 function handleFocus() {
   isSearchFocused.value = true
-  if (keywords.value.trim()) {
-    getSuggestions()
-  }
 }
 
 function handleBlur() {
@@ -503,19 +405,7 @@ function handleBlur() {
   }, 200)
 }
 
-watch(() => appConfig.neteaseEnabled, (enabled) => {
-  if (!enabled && selectedPlatform.value === 'netease') {
-    selectedPlatform.value = 'qqmusic'
-    songs.value = []
-    suggestions.value = []
-    hotSearches.value = []
-    defaultKeyword.value = ''
-  }
-})
-
 onMounted(() => {
-  loadHotSearches()
-  loadDefaultKeyword()
   refreshFavoriteSongIds()
   checkQQMusicConfigStatus()
   loadSearchHistory()
@@ -536,18 +426,6 @@ onMounted(() => {
         <div class="flex items-center gap-2">
           <span class="text-sm font-medium text-gray-700">媒体平台:</span>
           <div class="flex bg-gray-100 rounded-lg p-1">
-            <button
-              v-if="appConfig.neteaseEnabled"
-              @click="selectedPlatform = 'netease'"
-              :class="[
-                'px-3 py-1.5 text-sm font-medium rounded-md transition-all duration-200',
-                selectedPlatform === 'netease' 
-                  ? 'bg-white text-blue-600 shadow-sm' 
-                  : 'text-gray-600 hover:text-gray-900'
-              ]"
-            >
-              网易云音乐
-            </button>
             <button
               @click="selectedPlatform = 'qqmusic'"
               :class="[
@@ -600,7 +478,6 @@ onMounted(() => {
             :placeholder="getSearchPlaceholder()"
             class="w-full pl-10 pr-24 py-3 bg-gray-100/50 border border-gray-200 rounded-xl text-gray-900 focus:bg-white focus:ring-2 focus:ring-blue-100 focus:border-blue-500 outline-none transition-all duration-200 placeholder-gray-400 text-sm font-medium"
             @keypress="handleKeyPress"
-            @input="handleInput"
             @focus="handleFocus"
             @blur="handleBlur"
           />
@@ -617,23 +494,9 @@ onMounted(() => {
         <!-- Search suggestions and history -->
         <transition name="search-pop">
           <div 
-            v-if="isSearchFocused && ((showSuggestions && suggestions.length > 0) || (!keywords.trim() && searchHistory.length > 0))"
+            v-if="isSearchFocused && !keywords.trim() && searchHistory.length > 0"
             class="absolute top-full left-0 right-0 mt-2 bg-white/95 backdrop-blur-xl border border-gray-100/50 rounded-xl shadow-xl z-50 max-h-[320px] overflow-y-auto py-2 ring-1 ring-black/5"
           >
-            <!-- Search suggestions -->
-            <div v-if="showSuggestions && suggestions.length > 0">
-              <div class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide">搜索建议</div>
-              <div
-                v-for="suggestion in suggestions"
-                :key="suggestion"
-                @click="selectSuggestion(suggestion)"
-                class="px-4 py-2.5 hover:bg-blue-50/50 cursor-pointer flex items-center gap-3 group transition-colors"
-              >
-                <Search :size="16" class="text-gray-400 group-hover:text-blue-500" />
-                <span class="text-gray-700 group-hover:text-gray-900">{{ suggestion }}</span>
-              </div>
-            </div>
-            
             <!-- Search history -->
             <div v-if="!keywords.trim() && searchHistory.length > 0">
               <div class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center justify-between">
@@ -698,24 +561,6 @@ onMounted(() => {
            <p class="text-gray-500 text-sm mt-1">点歌、找视频、直接播放</p>
         </div>
         
-        <!-- Hot searches -->
-        <div v-if="selectedPlatform === 'netease' && hotSearches.length > 0">
-          <h3 class="text-sm font-bold text-gray-900 uppercase tracking-wider mb-4 flex items-center gap-2">
-            <span class="w-1 h-4 bg-red-500 rounded-full"></span>
-            热门搜索
-          </h3>
-          <div class="flex flex-wrap gap-2">
-            <button
-              v-for="(hotItem, index) in hotSearches.slice(0, 20)"
-              :key="index"
-              @click="selectHotSearch(hotItem)"
-              class="group px-4 py-2 bg-white border border-gray-100 hover:border-blue-200 hover:bg-blue-50/50 text-gray-700 rounded-full transition-all duration-200 text-sm flex items-center gap-2"
-            >
-              <span class="font-bold text-xs" :class="index < 3 ? 'text-red-500' : 'text-gray-400'">{{ index + 1 }}</span>
-              <span class="group-hover:text-blue-600">{{ hotItem.first || hotItem.keyword || hotItem }}</span>
-            </button>
-          </div>
-        </div>
       </div>
       
       <!-- Search results -->
