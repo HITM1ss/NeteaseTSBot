@@ -16,8 +16,6 @@ class Settings(BaseSettings):
     voice_grpc_addr: str = "127.0.0.1:50051"
     
     cookie_key: str = "dev-cookie-key"
-    enable_netease: bool = False
-    netease_api_base: str = "http://127.0.0.1:3000/"
     
     # 日志配置
     log_level: str = "INFO"
@@ -34,7 +32,7 @@ class Settings(BaseSettings):
     web_app_icon: str = ""
     web_log_level: str = "INFO"
     voice_description_title: str = "Yumi TSBot"
-    voice_description_intro: str = "TeamSpeak 音乐机器人\\n支持网易云 / QQ 音乐 / B站"
+    voice_description_intro: str = "TeamSpeak 音乐机器人\\n支持 QQ 音乐 / B站"
     bilibili_max_duration_minutes: int = 180
     bilibili_audio_cache_ttl_hours: int = 72
     bilibili_audio_cache_max_mb: int = 2048

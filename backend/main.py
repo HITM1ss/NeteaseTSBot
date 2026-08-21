@@ -55,8 +55,6 @@ from .runtime_config import (
     write_voice_config,
 )
 from .managed_assets import ASSET_BY_KEY, asset_path, asset_payload, delete_asset, detect_image_type, save_asset, MAX_IMAGE_BYTES
-from .netease import NeteaseClient
-from .netease_cookie import extract_netease_auth_cookie, has_netease_auth_cookie
 from .qqmusic import QQMusicClient
 from .voice_client import VoiceClient, VoiceStatus
 from .config import settings
@@ -73,13 +71,8 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-netease = NeteaseClient()
 qqmusic = QQMusicClient()
 voice = VoiceClient()
-
-def _require_netease_enabled() -> None:
-    if not settings.enable_netease:
-        raise HTTPException(status_code=404, detail="网易云功能已禁用")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BILIBILI_AUDIO_DIR = REPO_ROOT / "tmp" / "bilibili_audio"
@@ -106,18 +99,6 @@ _bilibili_view_summary_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _bilibili_view_summary_semaphore = asyncio.Semaphore(_BILIBILI_VIEW_SUMMARY_CONCURRENCY)
 _BILIBILI_SUBTITLE_CACHE_TTL_S = 1800.0
 _bilibili_subtitle_cache: dict[str, tuple[float, list[LyricLine]]] = {}
-_NETEASE_QUALITY_LEVELS = (
-    "standard",
-    "higher",
-    "exhigh",
-    "lossless",
-    "hires",
-    "jyeffect",
-    "sky",
-    "dolby",
-    "jymaster",
-)
-_NETEASE_QUEUE_META_PREFIX = "__netease_level__:"
 _QQMUSIC_QUEUE_META_PREFIX = "__qqmusic_quality__:"
 
 # Add OPTIONS handler for CORS preflight requests
@@ -210,26 +191,11 @@ _ts_desc_requested: bool = False
 _ts_desc_last_sent_at: float = 0.0
 
 
-class SearchResponse(BaseModel):
-    raw: dict
-
-
 class AddQueueRequest(BaseModel):
     track_id: str
     title: str
     artist: str = ""
     source_url: str
-
-
-class AddNeteaseQueueRequest(BaseModel):
-    song_id: str
-    title: str
-    artist: str = ""
-    album: str = ""
-    duration_ms: int | None = None
-    cover_url: str = ""
-    level: str = "auto"
-    play_now: bool = False
 
 
 class AddQQMusicQueueRequest(BaseModel):
@@ -281,7 +247,6 @@ class ExternalPlayerActionRequest(BaseModel):
 class ExternalQueueRequest(BaseModel):
     source: str = "qqmusic"
     keywords: str = ""
-    song_id: str = ""
     song_mid: str = ""
     video_id: str = ""
     title: str = ""
@@ -290,7 +255,6 @@ class ExternalQueueRequest(BaseModel):
     album_mid: str = ""
     duration_ms: int | None = None
     cover_url: str = ""
-    level: str = "auto"
     quality: str = "320"
     play_now: bool = False
 
@@ -347,8 +311,6 @@ async def _startup() -> None:
         initialize_runtime_settings(bootstrap_session)
     finally:
         bootstrap_session.close()
-
-    netease._base = settings.netease_api_base.rstrip("/")
 
     _main_loop = asyncio.get_running_loop()
     session = new_session()
@@ -698,36 +660,7 @@ async def _play_queue_item_internal(item_id: int, *, requested_by: str) -> bool:
         artwork_url = str(item.cover_url or "")
         source_url = str(item.source_url or "")
         playback_source_url = source_url
-        if item.track_id.startswith("netease:"):
-            if not settings.enable_netease:
-                logger.info("skip disabled netease queue item %s", item.id)
-                return False
-            cookie = _get_admin_cookie(session)
-            song_id = item.track_id.split(":", 1)[1]
-            quality_level = _extract_netease_queue_level(source_url)
-            playback_source_url, _trial, notice, duration_ms, artist, album, artwork_url = await _resolve_netease_playback_payload(
-                song_id=song_id,
-                cookie=cookie,
-                artist=artist,
-                album=album,
-                artwork_url=artwork_url,
-                duration_ms=duration_ms,
-                quality_level=quality_level,
-            )
-
-            if not await _is_play_request_current(play_request_generation):
-                return True
-
-            item.source_url = _encode_netease_queue_source(quality_level, playback_source_url)
-            item.album = album
-            item.duration = duration_ms
-            item.cover_url = artwork_url
-            if artist:
-                item.artist = artist
-
-            session.add(item)
-            session.commit()
-        elif item.track_id.startswith("qqmusic:"):
+        if item.track_id.startswith("qqmusic:"):
             # QQ Music URLs are short-lived. Refresh the URL whenever a queued
             # item starts instead of relying on the URL captured at enqueue time.
             song_mid = item.track_id.split(":", 1)[1].strip()
@@ -884,10 +817,6 @@ _remove_queue_item_internal = _delete_queue_item
 
 
 _AUTO_SKIP_PLAYBACK_STATUS_CODES = frozenset({402, 403, 404, 410, 422})
-_LEGACY_NETEASE_SKIP_DETAILS = frozenset({
-    "admin netease cookie not set",
-    "网易云功能已禁用",
-})
 _QUEUE_CONFIGURATION_ERROR_DETAILS = frozenset({
     "admin qqmusic cookie not set",
     "failed to decrypt admin qqmusic cookie",
@@ -910,8 +839,6 @@ def _should_auto_skip_unplayable_queue_item(exc: HTTPException) -> bool:
     detail = str(exc.detail or "").strip()
     normalized_detail = detail.lower()
 
-    if detail in _LEGACY_NETEASE_SKIP_DETAILS:
-        return True
     if detail in _QUEUE_CONFIGURATION_ERROR_DETAILS:
         return False
     if exc.status_code in _AUTO_SKIP_PLAYBACK_STATUS_CODES:
@@ -1044,9 +971,7 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
 
 
 def _serialize_queue_item(row: QueueItem) -> dict:
-    if row.track_id.startswith("netease:"):
-        source_url = _strip_netease_queue_meta(row.source_url)
-    elif row.track_id.startswith("qqmusic:"):
+    if row.track_id.startswith("qqmusic:"):
         source_url = _strip_qqmusic_queue_meta(row.source_url)
     else:
         source_url = row.source_url
@@ -1074,9 +999,7 @@ def _build_track_reference(track_id: str) -> dict[str, object]:
     suffix = suffix.strip()
 
     payload: dict[str, object] = {"source": source}
-    if source == "netease" and suffix:
-        payload["song_id"] = suffix
-    elif source == "qqmusic" and suffix:
+    if source == "qqmusic" and suffix:
         payload["song_mid"] = suffix
     elif source == "bilibili":
         video_id = _extract_bilibili_video_id(suffix or raw)
@@ -1118,80 +1041,6 @@ def _coerce_non_negative_int(value: object) -> int | None:
     return parsed if parsed >= 0 else None
 
 
-def _normalize_netease_quality_level(value: object, *, default: str = "auto", strict: bool = False) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return default
-
-    aliases = {
-        "auto": "auto",
-        "max": "auto",
-        "highest": "auto",
-        "standard": "standard",
-        "higher": "higher",
-        "exhigh": "exhigh",
-        "lossless": "lossless",
-        "hires": "hires",
-        "hi-res": "hires",
-        "jyeffect": "jyeffect",
-        "sky": "sky",
-        "dolby": "dolby",
-        "jymaster": "jymaster",
-        "master": "jymaster",
-    }
-    normalized = aliases.get(raw)
-    if normalized is not None:
-        return normalized
-
-    if strict:
-        supported = ", ".join(("auto",) + _NETEASE_QUALITY_LEVELS)
-        raise HTTPException(status_code=400, detail=f"invalid netease level, supported: {supported}")
-    return default
-
-
-def _resolve_netease_request_level(level: str) -> str:
-    normalized = _normalize_netease_quality_level(level, strict=True)
-    if normalized == "auto":
-        return "jymaster"
-    return normalized
-
-
-def _encode_netease_queue_source(level: str, source_url: str = "") -> str:
-    normalized = _normalize_netease_quality_level(level, strict=False)
-    resolved_source_url = str(source_url or "").strip()
-    if normalized == "auto":
-        return resolved_source_url
-    if resolved_source_url:
-        return f"{_NETEASE_QUEUE_META_PREFIX}{normalized}|{resolved_source_url}"
-    return f"{_NETEASE_QUEUE_META_PREFIX}{normalized}"
-
-
-def _encode_netease_queue_meta(level: str, source_url: str = "") -> str:
-    # Keep the older helper name working while all call sites converge.
-    return _encode_netease_queue_source(level, source_url)
-
-
-def _extract_netease_queue_level(source_url: object) -> str:
-    raw = str(source_url or "").strip()
-    if raw.startswith(_NETEASE_QUEUE_META_PREFIX):
-        level_raw, _, _rest = raw[len(_NETEASE_QUEUE_META_PREFIX) :].partition("|")
-        return _normalize_netease_quality_level(level_raw, strict=False)
-    return "auto"
-
-
-def _strip_netease_queue_meta(source_url: object) -> str:
-    raw = str(source_url or "").strip()
-    if not raw.startswith(_NETEASE_QUEUE_META_PREFIX):
-        return raw
-    _level, sep, rest = raw[len(_NETEASE_QUEUE_META_PREFIX) :].partition("|")
-    return rest.strip() if sep else ""
-
-
-def _is_netease_queue_meta(source_url: object) -> bool:
-    raw = str(source_url or "").strip()
-    return raw.startswith(_NETEASE_QUEUE_META_PREFIX)
-
-
 def _normalize_qqmusic_quality(value: object, *, default: str = "320") -> str:
     raw = str(value or "").strip().lower()
     aliases = {
@@ -1226,60 +1075,6 @@ def _strip_qqmusic_queue_meta(source_url: object) -> str:
         return raw
     _quality, sep, rest = raw[len(_QQMUSIC_QUEUE_META_PREFIX) :].partition("|")
     return rest.strip() if sep else ""
-
-
-def _extract_netease_artist_names(song: dict) -> str:
-    artists = (song.get("ar") or song.get("artists") or [])
-    if not isinstance(artists, list):
-        return ""
-    names = [str((artist or {}).get("name") or "").strip() for artist in artists if isinstance(artist, dict)]
-    return ", ".join([name for name in names if name])
-
-
-def _extract_netease_album_fields(song: dict) -> tuple[str, str]:
-    album = song.get("al") or song.get("album") or {}
-    if isinstance(album, dict):
-        return (
-            str(album.get("name") or "").strip(),
-            str(album.get("picUrl") or album.get("pic_url") or "").strip(),
-        )
-    if isinstance(album, str):
-        return album.strip(), ""
-    return "", ""
-
-
-def _normalize_netease_song(song: dict) -> dict | None:
-    song_id = str(song.get("id") or "").strip()
-    if not song_id:
-        return None
-
-    album_name, artwork_url = _extract_netease_album_fields(song)
-    duration_ms = _coerce_positive_int(song.get("dt") or song.get("duration"))
-    return {
-        "source": "netease",
-        "track_id": f"netease:{song_id}",
-        "song_id": song_id,
-        "title": str(song.get("name") or song_id).strip(),
-        "artist": _extract_netease_artist_names(song),
-        "album": album_name,
-        "duration_ms": duration_ms,
-        "artwork_url": artwork_url,
-    }
-
-
-def _normalize_netease_search_items(data: dict) -> list[dict]:
-    songs = (((data or {}).get("result") or {}).get("songs") or [])
-    if not isinstance(songs, list):
-        return []
-
-    items: list[dict] = []
-    for song in songs:
-        if not isinstance(song, dict):
-            continue
-        normalized = _normalize_netease_song(song)
-        if normalized is not None:
-            items.append(normalized)
-    return items
 
 
 def _extract_qqmusic_artist_names(song: dict) -> str:
@@ -2815,9 +2610,6 @@ async def voice_next() -> dict:
             played = await _play_queue_item_internal(item_id, requested_by="next")
         except HTTPException as exc:
             detail = str(exc.detail or "").strip()
-            if detail in _LEGACY_NETEASE_SKIP_DETAILS:
-                await _skip_unplayable_queue_item(item_id, reason=detail)
-                return {"ok": True, "action": "skipped_legacy_netease"}
             if _should_auto_skip_unplayable_queue_item(exc):
                 await _skip_unplayable_queue_item(item_id, reason=detail)
                 return {"ok": True, "action": "skipped_unplayable"}
@@ -3016,79 +2808,6 @@ async def voice_repeat(req: RepeatRequest) -> dict:
     return {"ok": True, "mode": _repeat_mode}
 
 
-@app.get("/search", response_model=SearchResponse)
-async def search(keywords: str, limit: int = 20, offset: int = 0) -> SearchResponse:
-    _require_netease_enabled()
-    data = await netease.search(keywords=keywords, limit=limit, offset=offset)
-    try:
-        songs = (((data or {}).get("result") or {}).get("songs") or [])
-        if isinstance(songs, list) and songs:
-            ids = [str((s or {}).get("id") or "").strip() for s in songs if isinstance(s, dict)]
-            ids = [i for i in ids if i]
-            if ids:
-                detail = await netease.song_detail(song_id=",".join(ids))
-                dsongs = (detail or {}).get("songs") or []
-                by_id: dict[str, dict] = {}
-                if isinstance(dsongs, list):
-                    for d in dsongs:
-                        if not isinstance(d, dict):
-                            continue
-                        sid = str(d.get("id") or "").strip()
-                        if sid:
-                            by_id[sid] = d
-
-                for s in songs:
-                    if not isinstance(s, dict):
-                        continue
-                    sid = str(s.get("id") or "").strip()
-                    if not sid:
-                        continue
-                    d = by_id.get(sid)
-                    if not d:
-                        continue
-
-                    al = d.get("al") or {}
-                    if isinstance(al, dict):
-                        pic = al.get("picUrl") or al.get("pic_url")
-                        name = al.get("name")
-                        if pic:
-                            album = s.get("album")
-                            if isinstance(album, dict):
-                                if not album.get("picUrl"):
-                                    album["picUrl"] = pic
-                                if name and not album.get("name"):
-                                    album["name"] = name
-                            else:
-                                s["album"] = {"picUrl": pic, "name": name or ""}
-
-                            al2 = s.get("al")
-                            if isinstance(al2, dict):
-                                if not al2.get("picUrl"):
-                                    al2["picUrl"] = pic
-                                if name and not al2.get("name"):
-                                    al2["name"] = name
-                            else:
-                                s["al"] = {"picUrl": pic, "name": name or ""}
-                        else:
-                            if name:
-                                album = s.get("album")
-                                if isinstance(album, dict) and not album.get("name"):
-                                    album["name"] = name
-                                al2 = s.get("al")
-                                if isinstance(al2, dict) and not al2.get("name"):
-                                    al2["name"] = name
-
-                    ar = d.get("ar") or []
-                    if isinstance(ar, list) and ar:
-                        if not s.get("ar"):
-                            s["ar"] = ar
-                        if not s.get("artists"):
-                            s["artists"] = ar
-    except Exception:
-        pass
-    return SearchResponse(raw=data)
-
-
 def _parse_lrc_to_lines(lrc: str) -> list[LyricLine]:
     lines: list[LyricLine] = []
     for raw in (lrc or "").splitlines():
@@ -3135,27 +2854,7 @@ async def lyrics(queue_item_id: int) -> LyricsResponse:
     finally:
         session.close()
 
-    if track_id.startswith("netease:"):
-        if not settings.enable_netease:
-            return LyricsResponse(lyrics=[])
-        # 网易云音乐歌词
-        song_id = track_id.split(":", 1)[1]
-        cookie = None
-        try:
-            # Prefer admin cookie to reduce rate limit / restricted lyrics.
-            session2 = new_session()
-            try:
-                cookie = _get_admin_cookie(session2)
-            finally:
-                session2.close()
-        except Exception:
-            cookie = None
-
-        data = await netease.lyric(song_id=song_id, cookie=cookie)
-        lrc = (((data or {}).get("lrc") or {}).get("lyric") or "")
-        return LyricsResponse(lyrics=_parse_lrc_to_lines(str(lrc)))
-    
-    elif track_id.startswith("qqmusic:"):
+    if track_id.startswith("qqmusic:"):
         # QQ 音乐歌词
         song_mid = track_id.split(":", 1)[1]
         try:
@@ -3183,266 +2882,6 @@ async def lyrics(queue_item_id: int) -> LyricsResponse:
     
     else:
         return LyricsResponse(lyrics=[])
-
-
-@app.get("/playlist/detail")
-async def playlist_detail(id: str, request: Request) -> dict:
-    _require_netease_enabled()
-    cookie = request.headers.get("x-netease-cookie")
-    return await netease.playlist_detail(playlist_id=id, cookie=cookie)
-
-
-@app.get("/netease/qr/key")
-async def netease_qr_key() -> dict:
-    _require_netease_enabled()
-    return await netease.qr_key()
-
-
-@app.get("/netease/qr/create")
-async def netease_qr_create(key: str) -> dict:
-    _require_netease_enabled()
-    return await netease.qr_create(key)
-
-
-@app.get("/netease/qr/check")
-async def netease_qr_check(key: str) -> dict:
-    _require_netease_enabled()
-    return await netease.qr_check(key)
-
-
-def _extract_netease_song_url_item(data: dict) -> dict:
-    code = (data or {}).get("code")
-    if code not in (None, 200):
-        raise HTTPException(status_code=502, detail=f"netease api error: code={code}")
-
-    items = (data or {}).get("data") or []
-    if not items:
-        raise HTTPException(status_code=502, detail="netease api error: empty data")
-
-    return (items[0] or {}) if isinstance(items, list) else {}
-
-
-def _resolve_netease_song_url(data: dict) -> str:
-    it = _extract_netease_song_url_item(data)
-    url = (it or {}).get("url") or ""
-    if url:
-        return url
-
-    item_code = (it or {}).get("code")
-    if item_code not in (None, 200):
-        if item_code == 404:
-            raise HTTPException(status_code=404, detail="netease track not found (song removed/unavailable)")
-        if item_code == -110:
-            raise HTTPException(status_code=503, detail="netease temporarily unavailable (code=-110), please retry")
-        raise HTTPException(status_code=403, detail=f"netease track unavailable: code={item_code}")
-
-    fee = (it or {}).get("fee")
-    payed = (it or {}).get("payed")
-    level = (it or {}).get("level")
-
-    if fee in (1, 4) or level == "vip" or (isinstance(payed, int) and payed > 0):
-        raise HTTPException(status_code=402, detail="netease track requires VIP/paid account")
-
-    raise HTTPException(status_code=403, detail="netease track not playable (no copyright/region restricted)")
-
-
-def _resolve_netease_song_url_level(data: dict) -> str:
-    item = _extract_netease_song_url_item(data)
-    return str((item or {}).get("level") or "").strip()
-
-
-def _resolve_netease_song_url_br(data: dict) -> int | None:
-    item = _extract_netease_song_url_item(data)
-    return _coerce_positive_int((item or {}).get("br"))
-
-
-def _resolve_netease_duration_ms(detail: dict) -> int | None:
-    songs = (detail or {}).get("songs") or []
-    if not songs or not isinstance(songs, list):
-        return None
-    dt = (songs[0] or {}).get("dt")
-    if isinstance(dt, int) and dt > 0:
-        return dt
-    return None
-
-
-def _resolve_netease_album_and_artwork(detail: dict) -> tuple[str, str]:
-    songs = (detail or {}).get("songs") or []
-    if not songs or not isinstance(songs, list):
-        return "", ""
-    s0 = songs[0] or {}
-    al = s0.get("al") or {}
-    if not isinstance(al, dict):
-        return "", ""
-    album = str(al.get("name") or "")
-    artwork_url = str(al.get("picUrl") or al.get("pic_url") or "")
-    return album, artwork_url
-
-
-def _cookie_fingerprint(cookie: str) -> dict:
-    c = (cookie or "").encode("utf-8")
-    h = hashlib.sha256(c).hexdigest()
-    return {
-        "len": len(c),
-        "sha256": h,
-    }
-
-
-def _cookie_key_fingerprint() -> dict:
-    k = (settings.cookie_key or "").encode("utf-8")
-    return {
-        "len": len(k),
-        "sha256": hashlib.sha256(k).hexdigest(),
-    }
-
-
-async def _netease_notice_if_trial(song_id: str, cookie: str) -> str:
-    notice, _dt, _artist, _album, _artwork = await _netease_notice_and_duration(song_id, cookie)
-    return notice
-
-
-async def _netease_notice_and_duration(song_id: str, cookie: str) -> tuple[str, int | None, str, str, str]:
-    detail = await netease.song_detail(song_id=song_id, cookie=cookie)
-    dt = _resolve_netease_duration_ms(detail)
-    meta = _extract_song_meta_from_detail(detail, song_id)
-    artist = ""
-    if meta is not None:
-        _title, artist = meta
-    album, artwork_url = _resolve_netease_album_and_artwork(detail)
-    if dt is not None and dt <= 30_000:
-        return "该曲为试听版(≤30秒)，可能需要会员", dt, artist, album, artwork_url
-    return "", dt, artist, album, artwork_url
-
-
-def _netease_notice_for_duration(duration_ms: int | None) -> str:
-    if duration_ms is None:
-        return ""
-    if int(duration_ms) <= 0:
-        return ""
-    if int(duration_ms) <= 30_000:
-        return "该曲为试听版(≤30秒)，可能需要会员"
-    return ""
-
-
-async def _resolve_netease_playback_payload(
-    *,
-    song_id: str,
-    cookie: str,
-    artist: str = "",
-    album: str = "",
-    artwork_url: str = "",
-    duration_ms: int | None = None,
-    quality_level: str = "auto",
-) -> tuple[str, bool, str, int | None, str, str, str]:
-    resolved_artist = (artist or "").strip()
-    resolved_album = (album or "").strip()
-    resolved_artwork_url = (artwork_url or "").strip()
-    resolved_duration_ms = int(duration_ms) if duration_ms is not None and int(duration_ms) > 0 else None
-    notice = _netease_notice_for_duration(resolved_duration_ms)
-
-    if resolved_duration_ms is None or not resolved_artist or not resolved_album or not resolved_artwork_url:
-        detail_notice, detail_duration_ms, detail_artist, detail_album, detail_artwork_url = await _netease_notice_and_duration(song_id, cookie)
-        if resolved_duration_ms is None:
-            resolved_duration_ms = detail_duration_ms
-        if detail_artist and not resolved_artist:
-            resolved_artist = detail_artist
-        if detail_album and not resolved_album:
-            resolved_album = detail_album
-        if detail_artwork_url and not resolved_artwork_url:
-            resolved_artwork_url = detail_artwork_url
-        if detail_notice:
-            notice = detail_notice
-        elif not notice:
-            notice = _netease_notice_for_duration(resolved_duration_ms)
-
-    requested_level = _resolve_netease_request_level(quality_level)
-    data = await netease.song_url_v1(song_id=song_id, cookie=cookie, level=requested_level)
-    trial = False
-    try:
-        url = _resolve_netease_song_url(data)
-    except HTTPException as e:
-        if e.status_code == 402:
-            trial_data = await netease.song_url(song_id=song_id, cookie=cookie, br=128000)
-            url = _resolve_netease_song_url(trial_data)
-            trial = True
-        else:
-            raise
-
-    return url, trial, notice, resolved_duration_ms, resolved_artist, resolved_album, resolved_artwork_url
-
-
-@app.get("/netease/song/url")
-async def song_url(id: str, level: str = "auto", session: Session = Depends(get_session)) -> dict:
-    _require_netease_enabled()
-    cookie = _get_admin_cookie(session)
-    requested_level = _resolve_netease_request_level(level)
-    data = await netease.song_url_v1(song_id=id, cookie=cookie, level=requested_level)
-    try:
-        url = _resolve_netease_song_url(data)
-        return {
-            "url": url,
-            "trial": False,
-            "requested_level": _normalize_netease_quality_level(level, strict=True),
-            "level": _resolve_netease_song_url_level(data),
-            "br": _resolve_netease_song_url_br(data),
-        }
-    except HTTPException as e:
-        if e.status_code == 402:
-            trial_data = await netease.song_url(song_id=id, cookie=cookie, br=128000)
-            url = _resolve_netease_song_url(trial_data)
-            return {
-                "url": url,
-                "trial": True,
-                "requested_level": _normalize_netease_quality_level(level, strict=True),
-                "level": _resolve_netease_song_url_level(trial_data),
-                "br": _resolve_netease_song_url_br(trial_data),
-            }
-        raise
-
-
-
-def _get_netease_cookie_from_header(request: Request) -> str:
-    c = (request.headers.get("x-netease-cookie") or "").strip()
-    if not c:
-        raise HTTPException(status_code=400, detail="netease cookie not set")
-    if c.lower().startswith("cookie:"):
-        c = c.split(":", 1)[1].strip()
-    c = c.replace("\r", "").replace("\n", "")
-
-    parts: list[str] = []
-    banned = {"max-age", "expires", "path", "domain", "samesite"}
-    for raw in c.split(";"):
-        s = raw.strip()
-        if not s:
-            continue
-        low = s.lower()
-        if low in ("secure", "httponly"):
-            continue
-        if "=" not in s:
-            continue
-        k, v = s.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-        if not k or not v:
-            continue
-        if k.lower() in banned:
-            continue
-        parts.append(f"{k}={v}")
-
-    return "; ".join(parts) if parts else c
-
-
-def _get_admin_cookie(session: Session) -> str:
-    row = session.get(Secret, "netease_cookie")
-    if not row:
-        raise HTTPException(status_code=400, detail="admin netease cookie not set")
-    try:
-        cookie = decrypt_text(row.value).strip()
-    except Exception:
-        raise HTTPException(status_code=500, detail="failed to decrypt admin netease cookie")
-    if not has_netease_auth_cookie(cookie):
-        raise HTTPException(status_code=400, detail="admin netease cookie not set")
-    return cookie
 
 
 def _get_admin_qqmusic_cookie(session: Session) -> str:
@@ -3518,108 +2957,6 @@ def _try_parse_qqmusic_song_mid(s: str) -> str | None:
     return None
 
 
-def _extract_song_meta_from_search_first(raw: dict) -> tuple[str, str, str] | None:
-    songs = (((raw or {}).get("result") or {}).get("songs") or [])
-    if not songs or not isinstance(songs, list):
-        return None
-    s0 = songs[0] or {}
-    sid = str(s0.get("id") or "")
-    if not sid:
-        return None
-    title = str(s0.get("name") or "")
-    artist = _extract_netease_artist_names(s0)
-    return sid, title, artist
-
-
-def _extract_song_meta_from_detail(detail: dict, song_id: str) -> tuple[str, str] | None:
-    songs = (detail or {}).get("songs") or []
-    if not songs or not isinstance(songs, list):
-        return None
-    s0 = songs[0] or {}
-    title = str(s0.get("name") or song_id)
-    artist = _extract_netease_artist_names(s0)
-    return title, artist
-
-
-def _extract_playlist_search_items(raw: dict) -> list[dict[str, str]]:
-    playlists = (((raw or {}).get("result") or {}).get("playlists") or [])
-    if not isinstance(playlists, list):
-        return []
-
-    items: list[dict[str, str]] = []
-    for playlist in playlists:
-        if not isinstance(playlist, dict):
-            continue
-        playlist_id = str(playlist.get("id") or "").strip()
-        if not playlist_id:
-            continue
-        creator = playlist.get("creator") or {}
-        creator_name = (
-            str(creator.get("nickname") or "").strip()
-            if isinstance(creator, dict)
-            else str(creator).strip()
-        ) or str(playlist.get("creatorName") or "").strip()
-        track_count = str(playlist.get("trackCount") or playlist.get("track_count") or "").strip()
-        items.append(
-            {
-                "id": playlist_id,
-                "name": str(playlist.get("name") or playlist_id).strip(),
-                "creator": creator_name,
-                "track_count": track_count,
-            }
-        )
-    return items
-
-
-def _extract_playlist_tracks(detail: dict) -> tuple[str, list[dict]]:
-    playlist = (detail or {}).get("playlist") or {}
-    if not isinstance(playlist, dict):
-        return "", []
-    name = str(playlist.get("name") or "").strip()
-    tracks = playlist.get("tracks") or []
-    if not isinstance(tracks, list):
-        return name, []
-    return name, [track for track in tracks if isinstance(track, dict)]
-
-
-async def _load_netease_playlist_tracks(
-    detail: dict,
-    *,
-    cookie: str | None = None,
-) -> tuple[str, list[dict]]:
-    """Return playlist tracks, filling in trackIds when the API omits tracks."""
-    name, tracks = _extract_playlist_tracks(detail)
-    playlist = (detail or {}).get("playlist") or {}
-    if not isinstance(playlist, dict):
-        return name, tracks
-    raw_ids = playlist.get("trackIds") or playlist.get("track_ids") or []
-    if not isinstance(raw_ids, list):
-        return name, tracks
-    ids = [
-        str((entry or {}).get("id") or "").strip()
-        for entry in raw_ids
-        if isinstance(entry, dict) and str((entry or {}).get("id") or "").strip()
-    ]
-    if not ids or len(ids) <= len(tracks):
-        return name, tracks
-
-    chunks = [ids[index : index + 200] for index in range(0, len(ids), 200)]
-    results = await asyncio.gather(
-        *[netease.song_detail(song_id=",".join(chunk), cookie=cookie) for chunk in chunks],
-        return_exceptions=True,
-    )
-    resolved: list[dict] = []
-    for result in results:
-        if isinstance(result, Exception):
-            continue
-        if not isinstance(result, dict):
-            continue
-        songs = (result or {}).get("songs") or []
-        if isinstance(songs, list):
-            resolved.extend(song for song in songs if isinstance(song, dict))
-    return name, resolved or tracks
-
-
 def _ts_playlist_result_key(*, invoker_unique_id: str, invoker_name: str) -> str:
     unique_id = (invoker_unique_id or "").strip()
     if unique_id:
@@ -3651,90 +2988,6 @@ def _get_ts_playlist_results(key: str) -> list[dict[str, str]]:
     return playlists
 
 
-async def _enqueue_netease_song(
-    *,
-    song_id: str,
-    title: str,
-    artist: str,
-    play_now: bool,
-    requested_by: str,
-    album: str = "",
-    duration_ms: int | None = None,
-    artwork_url: str = "",
-    quality_level: str = "auto",
-) -> tuple[int, bool]:
-    session = new_session()
-    try:
-        normalized_level = _normalize_netease_quality_level(quality_level, strict=True)
-        if not play_now:
-            item = QueueItem(
-                track_id=f"netease:{song_id}",
-                title=title,
-                artist=artist,
-                album=album,
-                duration=duration_ms,
-                cover_url=artwork_url,
-                source_url=_encode_netease_queue_meta(normalized_level),
-            )
-            session.add(item)
-            session.commit()
-            _schedule_ts_description_update()
-            return int(item.id), False
-
-        cookie = _get_admin_cookie(session)
-        url, trial, notice, resolved_duration_ms, resolved_artist, resolved_album, resolved_artwork_url = await _resolve_netease_playback_payload(
-            song_id=song_id,
-            cookie=cookie,
-            artist=artist,
-            album=album,
-            artwork_url=artwork_url,
-            duration_ms=duration_ms,
-            quality_level=normalized_level,
-        )
-
-        final_artist = resolved_artist or artist
-
-        item = QueueItem(
-            track_id=f"netease:{song_id}",
-            title=title,
-            artist=final_artist,
-            album=resolved_album,
-            duration=resolved_duration_ms,
-            cover_url=resolved_artwork_url,
-            source_url=_encode_netease_queue_source(normalized_level, url),
-        )
-        session.add(item)
-        session.commit()
-
-        _schedule_ts_description_update()
-
-        await _set_now_playing_queue_item(
-            int(item.id),
-            url,
-            duration_ms=resolved_duration_ms,
-            artist=final_artist,
-            album=resolved_album,
-            artwork_url=resolved_artwork_url,
-        )
-        await voice.play(source_url=url, title=title, requested_by=requested_by, notice=notice)
-        hist = HistoryItem(
-            track_id=item.track_id,
-            title=title,
-            artist=final_artist,
-            album=resolved_album,
-            duration=resolved_duration_ms,
-            cover_url=resolved_artwork_url,
-            source_url=url,
-            requested_by=requested_by,
-        )
-        session.add(hist)
-        session.commit()
-
-        return int(item.id), trial
-    finally:
-        session.close()
-
-
 async def _enqueue_qqmusic_song(
     *,
     song_mid: str,
@@ -3751,7 +3004,7 @@ async def _enqueue_qqmusic_song(
     """Enqueue a QQ Music song"""
     session = new_session()
     try:
-        # Use admin QQ Music cookie (server-side), like netease.
+        # Use the server-side QQ Music administrator cookie.
         cookie = _get_admin_qqmusic_cookie(session)
         qqmusic.set_cookie(cookie)
 
@@ -4480,9 +3733,6 @@ async def _handle_chat_command(
         await reply("unknown command, try !help")
     except HTTPException as e:
         detail = str(getattr(e, "detail", "") or "").strip()
-        if detail == "网易云功能已禁用":
-            await reply("网易云功能已禁用，请使用 Web 端的 QQ 音乐或 B 站搜索")
-            return
         if detail == "admin qqmusic cookie not set":
             await reply("QQ 音乐后台授权未配置，请在 Web 控制台“系统设置 → 音乐会员登录”中完成 QQ 音乐后台授权")
             return
@@ -4603,7 +3853,6 @@ def public_config() -> dict:
         "app_name": settings.web_app_name,
         "app_icon": icon.public_path if asset_path(icon).is_file() else "",
         "log_level": settings.web_log_level,
-        "netease_enabled": bool(settings.enable_netease),
     }
 
 
@@ -4769,7 +4018,6 @@ async def admin_update_settings(
     require_csrf(request, admin_session)
     effects = update_settings(session, req.values, apply=req.apply)
     if req.apply:
-        netease._base = settings.netease_api_base.rstrip("/")
         BILIBILI_AUDIO_CACHE_TTL_SECONDS = max(0, settings.bilibili_audio_cache_ttl_hours) * 3600
         BILIBILI_AUDIO_CACHE_MAX_BYTES = max(0, settings.bilibili_audio_cache_max_mb) * 1024 * 1024
         BILIBILI_AUDIO_PARTIAL_TTL_SECONDS = max(0, settings.bilibili_audio_partial_ttl_minutes) * 60
@@ -4851,35 +4099,6 @@ def admin_delete_asset(
     }
 
 
-@app.get("/admin/status")
-def admin_status(request: Request, session: Session = Depends(get_session)) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    row = session.get(Secret, "netease_cookie")
-    if not row or not row.value:
-        return {"admin_cookie_set": False}
-    try:
-        cookie = decrypt_text(row.value).strip()
-    except Exception:
-        cookie = ""
-    return {"admin_cookie_set": has_netease_auth_cookie(cookie)}
-
-
-@app.get("/admin/account")
-async def admin_account(request: Request, session: Session = Depends(get_session)) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    cookie = _get_admin_cookie(session)
-    data = await netease.user_account(cookie=cookie)
-    profile = (data or {}).get("profile") or {}
-    account = (data or {}).get("account") or {}
-    return {
-        "user_id": profile.get("userId") or account.get("id"),
-        "nickname": profile.get("nickname") or "",
-        "vip_type": profile.get("vipType"),
-    }
-
-
 @app.post("/admin/ts/description")
 async def admin_ts_description(req: TSClientDescriptionRequest, request: Request) -> dict:
     _require_admin_token(request)
@@ -4888,24 +4107,6 @@ async def admin_ts_description(req: TSClientDescriptionRequest, request: Request
         raise HTTPException(status_code=400, detail="description too long")
     await voice.set_client_description(desc)
     return {"ok": True}
-
-
-@app.get("/admin/debug/cookie")
-async def admin_debug_cookie(request: Request, session: Session = Depends(get_session)) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    cookie = _get_admin_cookie(session)
-    return {"fingerprint": _cookie_fingerprint(cookie)}
-
-
-@app.get("/admin/debug/config")
-async def admin_debug_config(request: Request) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    return {
-        "cookie_key_fingerprint": _cookie_key_fingerprint(),
-        "netease_api_base": settings.netease_api_base,
-    }
 
 
 @app.get("/admin/debug/runtime")
@@ -4917,212 +4118,6 @@ async def admin_debug_runtime(request: Request) -> dict:
         "sqlite_db_path": str(Path(sqlite_db_path).resolve()) if sqlite_db_path else None,
         "database_url": get_database_url(),
     }
-
-
-@app.get("/admin/debug/song_url")
-async def admin_debug_song_url(request: Request, id: str, level: str = "auto", session: Session = Depends(get_session)) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    cookie = _get_admin_cookie(session)
-
-    detail = await netease.song_detail(song_id=id, cookie=cookie)
-    dt = _resolve_netease_duration_ms(detail)
-
-    requested_level = _normalize_netease_quality_level(level, strict=True)
-    data = await netease.song_url_v1(song_id=id, cookie=cookie, level=_resolve_netease_request_level(requested_level))
-    trial = False
-    try:
-        url = _resolve_netease_song_url(data)
-    except HTTPException as e:
-        if e.status_code == 402:
-            trial_data = await netease.song_url(song_id=id, cookie=cookie, br=128000)
-            url = _resolve_netease_song_url(trial_data)
-            trial = True
-        else:
-            raise
-
-    it = _extract_netease_song_url_item(data)
-
-    return {
-        "song_id": id,
-        "trial": trial,
-        "duration_ms": dt,
-        "url": url,
-        "requested_level": requested_level,
-        "song_url_item": {
-            "code": it.get("code"),
-            "fee": it.get("fee"),
-            "payed": it.get("payed"),
-            "level": it.get("level"),
-            "br": it.get("br"),
-        },
-        "cookie_fingerprint": _cookie_fingerprint(cookie),
-    }
-
-
-@app.post("/admin/cookie")
-def admin_set_cookie(
-    req: AdminCookieSetRequest,
-    request: Request,
-    session: Session = Depends(get_session),
-) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    c = (req.cookie or "").strip()
-    if not c:
-        raise HTTPException(status_code=400, detail="cookie is empty")
-    if c.lower().startswith("cookie:"):
-        c = c.split(":", 1)[1].strip()
-    c = c.replace("\r", "").replace("\n", "")
-    if not has_netease_auth_cookie(c):
-        raise HTTPException(status_code=400, detail="cookie does not contain a usable netease auth token")
-    _set_secret(session, "netease_cookie", c)
-    return {"ok": True, "admin_cookie_set": True}
-
-
-@app.get("/admin/qr/key")
-async def admin_qr_key(request: Request) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    return await netease.qr_key()
-
-
-@app.get("/admin/qr/create")
-async def admin_qr_create(key: str, request: Request) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    return await netease.qr_create(key)
-
-
-@app.get("/admin/qr/check")
-async def admin_qr_check(key: str, request: Request, session: Session = Depends(get_session)) -> dict:
-    _require_admin_token(request)
-    _require_netease_enabled()
-    data = await netease.qr_check(key)
-    code = (data or {}).get("code")
-    if code == 803:
-        cookie = extract_netease_auth_cookie(str((data or {}).get("cookie") or ""))
-        if not cookie:
-            return {
-                "code": code,
-                "message": "authorized but no usable authentication cookie was returned",
-                "admin_cookie_set": False,
-            }
-        _set_secret(session, "netease_cookie", cookie)
-        return {"code": code, "message": "authorized", "admin_cookie_set": True}
-    if code == 800:
-        return {"code": code, "message": "expired", "admin_cookie_set": False}
-    if code == 802:
-        return {"code": code, "message": "scanned", "admin_cookie_set": False}
-    if code == 801:
-        return {"code": code, "message": "waiting", "admin_cookie_set": False}
-    return {"code": code, "message": "unknown", "admin_cookie_set": False, "raw": data}
-
-
-@app.get("/netease/account")
-async def netease_account(request: Request) -> dict:
-    _require_netease_enabled()
-    cookie = _get_netease_cookie_from_header(request)
-    return await netease.user_account(cookie=cookie)
-
-
-@app.get("/netease/likelist")
-async def netease_likelist(request: Request, offset: int = 0, limit: int = 0) -> dict:
-    _require_netease_enabled()
-    cookie = _get_netease_cookie_from_header(request)
-    account = await netease.user_account(cookie=cookie)
-    profile = (account or {}).get("profile") or {}
-    uid = profile.get("userId")
-    if not uid:
-        raise HTTPException(status_code=400, detail="unable to determine uid from cookie")
-    data = await netease.likelist(uid=str(uid), cookie=cookie)
-    ids = (data or {}).get("ids") or []
-
-    songs: list[dict] = []
-    try:
-        if isinstance(ids, list) and ids:
-            chunk_size = 200
-            id_strs = [str(i) for i in ids if i is not None and str(i).strip()]
-
-            if offset < 0:
-                offset = 0
-            if limit and limit > 0:
-                page_ids = id_strs[offset : offset + limit]
-            else:
-                page_ids = id_strs
-
-            async def _fetch_song_detail(chunk: list[str]) -> list[dict]:
-                if not chunk:
-                    return []
-                detail = await netease.song_detail(song_id=",".join(chunk), cookie=cookie)
-                dsongs = (detail or {}).get("songs") or []
-                if isinstance(dsongs, list) and dsongs:
-                    return [s for s in dsongs if isinstance(s, dict)]
-                return []
-
-            chunks = [page_ids[i : i + chunk_size] for i in range(0, len(page_ids), chunk_size)]
-            results = await asyncio.gather(*[_fetch_song_detail(c) for c in chunks], return_exceptions=True)
-            for r in results:
-                if isinstance(r, Exception):
-                    continue
-                songs.extend(r)
-    except Exception:
-        songs = []
-
-    # Keep original fields (ids, code, etc.) and add songs for frontend rendering.
-    out = dict(data or {})
-    out["songs"] = songs
-    try:
-        if isinstance(ids, list):
-            out["total"] = len(ids)
-            out["offset"] = int(offset)
-            out["limit"] = int(limit)
-            if limit and limit > 0:
-                out["has_more"] = (offset + limit) < len(ids)
-    except Exception:
-        pass
-    return out
-
-
-@app.get("/netease/likes")
-async def netease_likes(request: Request, offset: int = 0, limit: int = 0) -> dict:
-    """Alias for likelist to match frontend expectations"""
-    return await netease_likelist(request, offset=offset, limit=limit)
-
-
-@app.get("/netease/playlists")
-async def netease_playlists(request: Request) -> dict:
-    _require_netease_enabled()
-    cookie = _get_netease_cookie_from_header(request)
-    account = await netease.user_account(cookie=cookie)
-    profile = (account or {}).get("profile") or {}
-    uid = profile.get("userId")
-    if not uid:
-        raise HTTPException(status_code=400, detail="unable to determine uid from cookie")
-    return await netease.user_playlist(uid=str(uid), cookie=cookie)
-
-
-@app.post("/queue/netease")
-async def add_queue_netease(req: AddNeteaseQueueRequest) -> dict:
-    _require_netease_enabled()
-    try:
-        item_id, trial = await _enqueue_netease_song(
-            song_id=req.song_id,
-            title=req.title,
-            artist=req.artist,
-            play_now=req.play_now,
-            requested_by="web",
-            album=req.album,
-            duration_ms=req.duration_ms,
-            artwork_url=req.cover_url,
-            quality_level=req.level,
-        )
-        return {"ok": True, "id": item_id, "trial": trial}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to enqueue netease song {req.song_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/queue/qqmusic")
@@ -5247,36 +4242,6 @@ async def _replay_history_item(
     track_id = str(hist_item.track_id or "").strip()
     if not track_id:
         raise HTTPException(status_code=400, detail="history track_id is empty")
-
-    if track_id.startswith("netease:"):
-        _require_netease_enabled()
-        song_id = track_id.split(":", 1)[1].strip()
-        if not song_id:
-            raise HTTPException(status_code=400, detail="netease song_id is empty")
-
-        item_id, trial = await _enqueue_netease_song(
-            song_id=song_id,
-            title=hist_item.title,
-            artist=hist_item.artist,
-            play_now=play_now,
-            requested_by=requested_by,
-            album=hist_item.album,
-            duration_ms=hist_item.duration,
-            artwork_url=hist_item.cover_url,
-        )
-        return {
-            "ok": True,
-            "source": "netease",
-            "queue_id": item_id,
-            "trial": trial,
-            "play_now": play_now,
-            "message": f"{'Playing' if play_now else 'Added to queue'}: {hist_item.title}",
-            "track": {
-                "source": "netease",
-                "track_id": f"netease:{song_id}",
-                "song_id": song_id,
-            },
-        }
 
     if track_id.startswith("bilibili:"):
         video_id = _extract_bilibili_video_id(track_id)
@@ -5427,9 +4392,6 @@ async def external_search(
     page = max(1, int(page))
     limit = max(1, min(int(limit), 50))
 
-    if provider == "netease":
-        _require_netease_enabled()
-
     if provider == "bilibili":
         return await _bilibili_search_videos(keywords=query, limit=limit, page=page)
 
@@ -5445,23 +4407,7 @@ async def external_search(
             "items": items,
         }
 
-    if provider != "netease":
-        raise HTTPException(status_code=400, detail="unsupported source")
-
-    offset = (page - 1) * limit
-    result = await search(keywords=query, limit=limit, offset=offset)
-    raw = result.raw
-    total = _coerce_positive_int((((raw or {}).get("result") or {}).get("songCount")))
-    items = _normalize_netease_search_items(raw)
-    return {
-        "source": provider,
-        "keywords": query,
-        "page": page,
-        "limit": limit,
-        "total": total,
-        "has_more": (offset + len(items)) < total if total is not None else len(items) == limit,
-        "items": items,
-    }
+    raise HTTPException(status_code=400, detail="unsupported source")
 
 
 @app.post("/external/queue", tags=["External API"])
@@ -5469,76 +4415,6 @@ async def external_add_queue(req: ExternalQueueRequest) -> dict:
     provider = (str(req.source or "").strip().lower() or "qqmusic")
     keywords = (req.keywords or "").strip()
     play_now = bool(req.play_now)
-
-    if provider == "netease":
-        _require_netease_enabled()
-        song_id = (req.song_id or "").strip()
-        title = (req.title or "").strip()
-        artist = (req.artist or "").strip()
-        album = (req.album or "").strip()
-        cover_url = (req.cover_url or "").strip()
-        duration_ms = req.duration_ms
-        level = _normalize_netease_quality_level(req.level, strict=True)
-
-        if not song_id:
-            if not keywords:
-                raise HTTPException(status_code=400, detail="song_id or keywords is required for netease")
-            result = await search(keywords=keywords, limit=1, offset=0)
-            items = _normalize_netease_search_items(result.raw)
-            if not items:
-                raise HTTPException(status_code=404, detail="netease song not found")
-            first = items[0]
-            song_id = str(first.get("song_id") or "").strip()
-            title = title or str(first.get("title") or song_id).strip()
-            artist = artist or str(first.get("artist") or "").strip()
-            album = album or str(first.get("album") or "").strip()
-            cover_url = cover_url or str(first.get("artwork_url") or "").strip()
-            duration_ms = duration_ms if duration_ms is not None else _coerce_positive_int(first.get("duration_ms"))
-
-        if song_id and (not title or not artist or not album or not cover_url or duration_ms is None):
-            detail = await netease.song_detail(song_id=song_id)
-            songs = (detail or {}).get("songs") or []
-            if isinstance(songs, list) and songs and isinstance(songs[0], dict):
-                normalized = _normalize_netease_song(songs[0])
-                if normalized is not None:
-                    title = title or str(normalized.get("title") or song_id).strip()
-                    artist = artist or str(normalized.get("artist") or "").strip()
-                    album = album or str(normalized.get("album") or "").strip()
-                    cover_url = cover_url or str(normalized.get("artwork_url") or "").strip()
-                    duration_ms = duration_ms if duration_ms is not None else _coerce_positive_int(normalized.get("duration_ms"))
-
-        if not song_id:
-            raise HTTPException(status_code=400, detail="song_id is empty")
-
-        item_id, trial = await _enqueue_netease_song(
-            song_id=song_id,
-            title=title or song_id,
-            artist=artist,
-            play_now=play_now,
-            requested_by="external_api",
-            album=album,
-            duration_ms=duration_ms,
-            artwork_url=cover_url,
-            quality_level=level,
-        )
-        return {
-            "ok": True,
-            "source": provider,
-            "queue_id": item_id,
-            "trial": trial,
-            "play_now": play_now,
-            "track": {
-                "source": provider,
-                "track_id": f"netease:{song_id}",
-                "song_id": song_id,
-                "title": title or song_id,
-                "artist": artist,
-                "album": album,
-                "duration_ms": duration_ms,
-                "artwork_url": cover_url,
-                "level": level,
-            },
-        }
 
     if provider == "bilibili":
         video_id = _extract_bilibili_video_id(req.video_id)
@@ -5708,133 +4584,6 @@ async def external_replay_history(
     if not hist_item:
         raise HTTPException(status_code=404, detail="History item not found")
     return await _replay_history_item(hist_item, play_now=play_now, requested_by="external_history")
-
-
-# 网易云音乐扩展功能 API
-
-@app.get("/netease/search/suggest")
-async def netease_search_suggest(keywords: str) -> dict:
-    """搜索建议"""
-    _require_netease_enabled()
-    try:
-        result = await netease.search_suggest(keywords)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/search/hot")
-async def netease_search_hot() -> dict:
-    """热搜列表"""
-    _require_netease_enabled()
-    try:
-        result = await netease.search_hot()
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/search/default")
-async def netease_search_default() -> dict:
-    """默认搜索关键词"""
-    _require_netease_enabled()
-    try:
-        result = await netease.search_default()
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/playlist/categories")
-async def netease_playlist_categories() -> dict:
-    """歌单分类"""
-    _require_netease_enabled()
-    try:
-        result = await netease.playlist_catlist()
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/playlist/hot")
-async def netease_playlist_hot_categories() -> dict:
-    """热门歌单分类"""
-    _require_netease_enabled()
-    try:
-        result = await netease.playlist_hot()
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/playlist/top")
-async def netease_top_playlists(cat: str = "全部", limit: int = 50, offset: int = 0) -> dict:
-    """网友精选歌单"""
-    _require_netease_enabled()
-    try:
-        result = await netease.top_playlist(cat=cat, limit=limit, offset=offset)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/playlist/highquality")
-async def netease_highquality_playlists(cat: str = "全部", limit: int = 20) -> dict:
-    """精品歌单"""
-    _require_netease_enabled()
-    try:
-        result = await netease.top_playlist_highquality(cat=cat, limit=limit)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/playlist/{playlist_id}/detail")
-async def netease_playlist_detail(playlist_id: str) -> dict:
-    """歌单详情"""
-    _require_netease_enabled()
-    try:
-        cookie = _get_admin_cookie_or_none()
-        result = await netease.playlist_detail(playlist_id, cookie=cookie)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/song/{song_id}/lyric")
-async def netease_song_lyric(song_id: str) -> dict:
-    """获取歌词"""
-    _require_netease_enabled()
-    try:
-        cookie = _get_admin_cookie_or_none()
-        result = await netease.lyric(song_id, cookie=cookie)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/netease/recommend/playlists")
-async def netease_recommend_playlists(limit: int = 30) -> dict:
-    """推荐歌单"""
-    _require_netease_enabled()
-    try:
-        cookie = _get_admin_cookie_or_none()
-        result = await netease.personalized(limit=limit, cookie=cookie)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-def _get_admin_cookie_or_none() -> str | None:
-    """获取管理员Cookie，如果不存在则返回None"""
-    try:
-        session = new_session()
-        try:
-            return _get_admin_cookie(session)
-        finally:
-            session.close()
-    except HTTPException:
-        return None
 
 
 def _get_admin_bilibili_cookie_or_none() -> str | None:

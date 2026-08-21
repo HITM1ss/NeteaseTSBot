@@ -135,133 +135,6 @@ class AdminCacheTests(unittest.TestCase):
                 self.assertEqual(0, result["memory_entries"]["bilibili_subtitles"])
 
 
-class AdminCookieStatusTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.netease_enabled = patch.object(main.settings, "enable_netease", True)
-        self.netease_enabled.start()
-
-    def tearDown(self) -> None:
-        self.netease_enabled.stop()
-
-    def test_encrypted_empty_cookie_is_not_reported_as_configured(self) -> None:
-        session = unittest.mock.Mock()
-        session.get.return_value = unittest.mock.Mock(value="encrypted-empty-cookie")
-
-        with (
-            patch.object(main, "_require_admin_token"),
-            patch.object(main, "decrypt_text", return_value=""),
-        ):
-            result = main.admin_status(object(), session)
-
-        self.assertFalse(result["admin_cookie_set"])
-
-    def test_encrypted_empty_cookie_is_treated_as_not_configured(self) -> None:
-        session = unittest.mock.Mock()
-        session.get.return_value = unittest.mock.Mock(value="encrypted-empty-cookie")
-
-        with patch.object(main, "decrypt_text", return_value=""):
-            with self.assertRaises(HTTPException) as raised:
-                main._get_admin_cookie(session)
-
-        self.assertEqual(400, raised.exception.status_code)
-
-    def test_metadata_only_cookie_is_treated_as_not_configured(self) -> None:
-        session = unittest.mock.Mock()
-        session.get.return_value = unittest.mock.Mock(value="encrypted-metadata-cookie")
-        metadata_cookie = "NMTID=device-id; __csrf=csrf-token"
-
-        with (
-            patch.object(main, "_require_admin_token"),
-            patch.object(main, "decrypt_text", return_value=metadata_cookie),
-        ):
-            status = main.admin_status(object(), session)
-            with self.assertRaises(HTTPException) as raised:
-                main._get_admin_cookie(session)
-
-        self.assertFalse(status["admin_cookie_set"])
-        self.assertEqual(400, raised.exception.status_code)
-
-    def test_metadata_only_cookie_is_not_saved_manually(self) -> None:
-        session = unittest.mock.Mock()
-        metadata_cookie = "NMTID=device-id; __csrf=csrf-token"
-
-        with (
-            patch.object(main, "_require_admin_token"),
-            patch.object(main, "_set_secret") as set_secret,
-            self.assertRaises(HTTPException) as raised,
-        ):
-            main.admin_set_cookie(main.AdminCookieSetRequest(cookie=metadata_cookie), object(), session)
-
-        self.assertEqual(400, raised.exception.status_code)
-        set_secret.assert_not_called()
-
-
-class NeteaseQrCookieTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        self.netease_enabled = patch.object(main.settings, "enable_netease", True)
-        self.netease_enabled.start()
-
-    def tearDown(self) -> None:
-        self.netease_enabled.stop()
-
-    async def test_qr_success_without_core_auth_cookie_is_rejected(self) -> None:
-        qr_response = {
-            "code": 803,
-            "cookie": "NMTID=device-id; __csrf=csrf-token; MUSIC_SNS=",
-        }
-
-        with (
-            patch.object(main, "_require_admin_token"),
-            patch.object(main, "_set_secret") as set_secret,
-            patch.object(main.netease, "qr_check", AsyncMock(return_value=qr_response)),
-        ):
-            result = await main.admin_qr_check("qr-key", object(), object())
-
-        self.assertEqual(803, result["code"])
-        self.assertFalse(result["admin_cookie_set"])
-        set_secret.assert_not_called()
-
-    async def test_qr_cookie_keeps_valid_auth_value_when_later_duplicate_is_empty(self) -> None:
-        qr_response = {
-            "code": 803,
-            "cookie": (
-                "MUSIC_U=valid-token; Path=/;;"
-                "MUSIC_U=; Max-Age=0; Path=/; __csrf=csrf-token"
-            ),
-        }
-
-        with (
-            patch.object(main, "_require_admin_token"),
-            patch.object(main, "_set_secret") as set_secret,
-            patch.object(main.netease, "qr_check", AsyncMock(return_value=qr_response)),
-        ):
-            result = await main.admin_qr_check("qr-key", object(), object())
-
-        self.assertTrue(result["admin_cookie_set"])
-        set_secret.assert_called_once_with(
-            unittest.mock.ANY,
-            "netease_cookie",
-            "MUSIC_U=valid-token; __csrf=csrf-token",
-        )
-
-
-class NeteaseFeatureFlagTests(unittest.IsolatedAsyncioTestCase):
-    async def test_search_is_rejected_without_calling_netease_client_when_disabled(self) -> None:
-        with (
-            patch.object(main.settings, "enable_netease", False),
-            patch.object(main.netease, "search", AsyncMock()) as search,
-        ):
-            with self.assertRaises(HTTPException) as raised:
-                await main.search("测试")
-
-        self.assertEqual(404, raised.exception.status_code)
-        search.assert_not_awaited()
-
-    def test_public_config_exposes_netease_feature_flag(self) -> None:
-        with patch.object(main.settings, "enable_netease", False):
-            self.assertFalse(main.public_config()["netease_enabled"])
-
-
 class QQMusicNormalizationTests(unittest.TestCase):
     def test_playlist_payload_uses_songname_and_songmid_fields(self) -> None:
         normalized = main._normalize_qqmusic_song(
@@ -328,7 +201,7 @@ class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("使用 select <编号>", notice.await_args_list[0].args[0])
         self.assertIn("已从歌单《测试歌单》加入 2 首歌曲", notice.await_args_list[1].args[0])
 
-    async def test_keyword_play_uses_qqmusic_without_netease_cookie(self) -> None:
+    async def test_keyword_play_uses_qqmusic(self) -> None:
         songs = [{
             "songmid": "mid12345",
             "name": "测试歌曲",
@@ -340,14 +213,12 @@ class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(main.qqmusic, "search_songs_simple", AsyncMock(return_value=songs)) as search,
             patch.object(main, "_enqueue_qqmusic_song", AsyncMock(return_value=(7, False))) as enqueue,
-            patch.object(main.netease, "search", AsyncMock()) as netease_search,
             patch.object(main.voice, "get_status", AsyncMock(return_value=SimpleNamespace(state="STATE_PLAYING"))),
             patch.object(main.voice, "send_notice", AsyncMock()) as notice,
         ):
             await main._handle_chat_command("Alice", "点歌 测试歌曲")
 
         search.assert_awaited_once_with("测试歌曲", limit=1, page=1)
-        netease_search.assert_not_awaited()
         enqueue.assert_awaited_once_with(
             song_mid="mid12345",
             title="测试歌曲",
@@ -362,7 +233,7 @@ class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("已加入队列", notice.await_args.args[0])
 
-    async def test_search_uses_qqmusic_when_netease_is_disabled(self) -> None:
+    async def test_search_uses_qqmusic(self) -> None:
         songs = [{
             "songmid": "mid12345",
             "name": "测试歌曲",
@@ -370,15 +241,12 @@ class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
         }]
 
         with (
-            patch.object(main.settings, "enable_netease", False),
             patch.object(main.qqmusic, "search_songs_simple", AsyncMock(return_value=songs)) as search,
-            patch.object(main.netease, "search", AsyncMock()) as netease_search,
             patch.object(main.voice, "send_notice", AsyncMock()) as notice,
         ):
             await main._handle_chat_command("Alice", "搜索 测试歌曲")
 
         search.assert_awaited_once_with("测试歌曲", limit=5, page=1)
-        netease_search.assert_not_awaited()
         self.assertIn("QQ 音乐搜索结果", notice.await_args.args[0])
 
     async def test_direct_qqmusic_mid_skips_search(self) -> None:
@@ -465,12 +333,10 @@ class ExternalQQMusicDefaultTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(main.qqmusic, "search_songs_simple", AsyncMock(return_value=songs)) as search,
-            patch.object(main.netease, "search", AsyncMock()) as netease_search,
         ):
             result = await main.external_search("测试歌曲")
 
         search.assert_awaited_once_with("测试歌曲", limit=20, page=1)
-        netease_search.assert_not_awaited()
         self.assertEqual("qqmusic", result["source"])
         self.assertEqual("mid12345", result["items"][0]["song_mid"])
 
@@ -564,22 +430,6 @@ class ExternalQQMusicDefaultTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main.time, "monotonic", return_value=100.0 + main._TS_PLAYLIST_RESULTS_TTL_S):
             self.assertEqual([], main._get_ts_playlist_results(alice_key))
-
-    def test_netease_search_metadata_accepts_artists_field(self) -> None:
-        raw = {
-            "result": {
-                "songs": [
-                    {
-                        "id": 123,
-                        "name": "歌曲",
-                        "ar": [],
-                        "artists": [{"name": "歌手一"}, {"name": "歌手二"}],
-                    }
-                ]
-            }
-        }
-
-        self.assertEqual(("123", "歌曲", "歌手一, 歌手二"), main._extract_song_meta_from_search_first(raw))
 
     def test_qqmusic_playlist_search_normalizes_cover_and_creator(self) -> None:
         raw = {
@@ -799,28 +649,6 @@ class PlaybackCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(404, raised.exception.status_code)
         self.assertEqual("queue item not found", raised.exception.detail)
         skip_item.assert_not_awaited()
-
-    async def test_shuffle_next_skips_legacy_netease_row_without_cookie_error(self) -> None:
-        with (
-            patch.object(main, "_shuffle_enabled", True),
-            patch.object(main, "_shuffle_queue", [42]),
-            patch.object(main, "_current_shuffle_index", -1),
-            patch.object(main, "_current_queue_item_id", None),
-            patch.object(main, "_pending_queue_item_id", None),
-            patch.object(
-                main,
-                "_play_queue_item_internal",
-                AsyncMock(side_effect=HTTPException(status_code=400, detail="admin netease cookie not set")),
-            ),
-            patch.object(main, "_delete_queue_item", AsyncMock()) as delete_item,
-            patch.object(main.voice, "send_notice", AsyncMock()),
-            patch.object(main, "_auto_play_next_from_queue", AsyncMock()) as play_next,
-        ):
-            result = await main.voice_next()
-
-        self.assertEqual("skipped_legacy_netease", result["action"])
-        delete_item.assert_awaited_once_with(42)
-        play_next.assert_awaited_once_with(start_after_id=42)
 
     async def test_repeat_one_replays_finished_item_without_deleting_it(self) -> None:
         with (

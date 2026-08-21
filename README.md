@@ -51,7 +51,7 @@ TSBot 的目标是把边界重新划清：
 
 项目由 3 个组件组成：
 
-- **backend/**: Python/FastAPI 后端（队列/搜索/网易云与 QQ 音乐接口/控制语音服务）
+- **backend/**: Python/FastAPI 后端（队列/搜索/QQ 音乐接口/控制语音服务）
 - **voice-service/**: Rust 语音服务（连接 TeamSpeak、播放音频，提供 gRPC 给后端调用）
 - **web/**: Vue3 + Vite 前端（Web 控制台/播放器 UI）
 
@@ -112,7 +112,6 @@ TSBot 的目标是把边界重新划清：
 
 > TeamSpeak 点歌、歌单和搜索命令使用 QQ 音乐；请先在 Web 控制台的“系统配置 → 音乐会员登录”完成 QQ 音乐后台授权。网易云功能仍可单独启用，供现有 Web/API 功能过渡使用。
 >
-> 升级后队列中已有的 `netease:` 项仍保留原来源；如需完全改用 QQ 音乐，请先清空旧队列，再使用新的点歌命令重新入队。
 
 ## 网易云音乐支持（可选，依赖 `NeteaseCloudMusicApi`）
 
