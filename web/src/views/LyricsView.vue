@@ -142,8 +142,6 @@ async function toggleLike() {
     source: currentQueueTrack.value.source,
     track_id: currentQueueTrack.value.track_id,
     song_mid: currentQueueTrack.value.song_mid,
-    video_id: currentQueueTrack.value.video_id,
-    webpage_url: currentQueueTrack.value.webpage_url,
     name: title.value,
     artist: artist.value,
     album: album.value,

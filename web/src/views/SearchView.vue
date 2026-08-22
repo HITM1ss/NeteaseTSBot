@@ -10,12 +10,7 @@ import {
   Music,
   Loader2,
   User,
-  Settings,
-  ExternalLink,
-  Star,
-  Tv,
-  ThumbsUp,
-  Coins
+  Settings
 } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
@@ -29,7 +24,6 @@ const status = ref('')
 const songs = ref<any[]>([])
 const loading = ref(false)
 const isSearchFocused = ref(false)
-const selectedPlatform = ref<'qqmusic' | 'bilibili'>('qqmusic')
 const qqMusicConfigured = ref(false)
 const { message: actionError, showMessage: showActionError } = useTransientMessage()
 
@@ -120,29 +114,16 @@ async function search(isLoadMore = false) {
   }
   
   try {
-    if (selectedPlatform.value === 'bilibili') {
-      const res = await apiGet<{ items: any[]; has_more: boolean }>(`/bilibili/search/videos?keywords=${encodeURIComponent(keywords.value)}&limit=${pageSize.value}&page=${currentPage.value}`)
-      const newSongs = res?.items || []
+    const res = await apiGet<{ songs: any[] }>(`/qqmusic/search/songs?keywords=${encodeURIComponent(keywords.value)}&limit=${pageSize.value}&page=${currentPage.value}`)
+    const newSongs = res?.songs || []
 
-      if (isLoadMore) {
-        songs.value = [...songs.value, ...newSongs]
-      } else {
-        songs.value = newSongs
-      }
-
-      hasMore.value = !!res?.has_more
+    if (isLoadMore) {
+      songs.value = [...songs.value, ...newSongs]
     } else {
-      const res = await apiGet<{ songs: any[] }>(`/qqmusic/search/songs?keywords=${encodeURIComponent(keywords.value)}&limit=${pageSize.value}&page=${currentPage.value}`)
-      const newSongs = res?.songs || []
-      
-      if (isLoadMore) {
-        songs.value = [...songs.value, ...newSongs]
-      } else {
-        songs.value = newSongs
-      }
-      
-      hasMore.value = newSongs.length === pageSize.value
+      songs.value = newSongs
     }
+
+    hasMore.value = newSongs.length === pageSize.value
   } catch (e: any) {
     error.value = String(e?.message ?? e)
     // 如果加载更多失败，回退页码
@@ -169,36 +150,18 @@ async function enqueue(song: any, playNow: boolean) {
   error.value = ''
   status.value = ''
   try {
-    if (selectedPlatform.value === 'bilibili') {
-      const videoId = getBilibiliVideoId(song)
-      if (!videoId) {
-        throw new Error('未找到 B 站视频 ID')
-      }
-
-      const res = await apiPost<{ ok: boolean; id: number; trial?: boolean }>('/queue/bilibili', {
-        video_id: videoId,
-        title: getSongTitle(song) || videoId,
-        artist: getSongArtist(song),
-        album: getSongAlbum(song),
-        play_now: playNow,
-        cover_url: getSongArtwork(song),
-        duration_ms: getSongDurationMs(song),
-      })
-      status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
-    } else {
-      const res = await apiPost<{ ok: boolean; id: number; source_url: string }>('/queue/qqmusic', {
-        song_mid: String(song.mid || song.songmid || song.song_mid),
-        title: getSongTitle(song),
-        artist: getSongArtist(song),
-        album: getSongAlbum(song),
-        play_now: playNow,
-        quality: "320",
-        album_mid: String(song.album?.mid || song.albummid || ""),
-        cover_url: getSongArtwork(song),
-        duration_ms: getSongDurationMs(song),
-      })
-      status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
-    }
+    const res = await apiPost<{ ok: boolean; id: number; source_url: string }>('/queue/qqmusic', {
+      song_mid: String(song.mid || song.songmid || song.song_mid),
+      title: getSongTitle(song),
+      artist: getSongArtist(song),
+      album: getSongAlbum(song),
+      play_now: playNow,
+      quality: "320",
+      album_mid: String(song.album?.mid || song.albummid || ""),
+      cover_url: getSongArtwork(song),
+      duration_ms: getSongDurationMs(song),
+    })
+    status.value = `已添加到播放队列 #${res.id}${playNow ? ' (正在播放)' : ''}`
     
     // Clear status after 3 seconds
     setTimeout(() => {
@@ -240,22 +203,12 @@ function parseDurationToMs(value: any): number | undefined {
   return seconds > 0 ? seconds * 1000 : undefined
 }
 
-function getBilibiliVideoId(song: any): string {
-  const raw = String(song?.video_id || song?.bvid || song?.track_id || song?.arcurl || '').trim()
-  const match = raw.match(/(BV[0-9A-Za-z]+|av\d+)/i)
-  if (!match) return ''
-  const value = match[1]
-  return value.toLowerCase().startsWith('bv') ? `BV${value.slice(2)}` : value.toLowerCase()
-}
-
 function getSongKey(song: any): string {
   return String(
     song?.track_id ||
     song?.id ||
     song?.songmid ||
     song?.mid ||
-    song?.bvid ||
-    song?.video_id ||
     song?.name ||
     song?.title ||
     ''
@@ -267,109 +220,27 @@ function getSongTitle(song: any): string {
 }
 
 function getSongArtist(song: any): string {
-  if (selectedPlatform.value === 'qqmusic') {
-    const artists = song?.singer || song?.artists || song?.artist
-    if (Array.isArray(artists)) {
-      return artists.map((a: any) => a?.name || a).filter(Boolean).join(', ')
-    }
-    return String(artists || '').trim()
+  const artists = song?.singer || song?.artists || song?.artist
+  if (Array.isArray(artists)) {
+    return artists.map((a: any) => a?.name || a).filter(Boolean).join(', ')
   }
-  if (selectedPlatform.value === 'bilibili') {
-    return String(song?.artist || song?.author || song?.owner?.name || '').trim()
-  }
-  return ''
+  return String(artists || '').trim()
 }
 
 function getSongAlbum(song: any): string {
-  if (selectedPlatform.value === 'qqmusic') {
-    return String(song?.album?.name || song?.album?.title || song?.albumname || song?.album || '').trim()
-  }
-  if (selectedPlatform.value === 'bilibili') {
-    return String(song?.album || song?.typename || '').trim()
-  }
-  return ''
+  return String(song?.album?.name || song?.album?.title || song?.albumname || song?.album || '').trim()
 }
 
 function getSongArtwork(song: any): string {
-  if (selectedPlatform.value === 'qqmusic') {
-    const albumMid = String(song?.album?.pmid || song?.album?.mid || song?.albummid || '').trim()
-    return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ''
-  }
-  if (selectedPlatform.value === 'bilibili') {
-    const raw = String(song?.artwork_url || song?.pic || song?.thumbnail || '').trim()
-    if (!raw) return ''
-    if (raw.startsWith('//')) return `https:${raw}`
-    return raw
-  }
-  return ''
-}
-
-function getSongDescription(song: any): string {
-  if (selectedPlatform.value !== 'bilibili') return ''
-  return String(song?.description || song?.desc || '').trim()
-}
-
-function getSongWebpageUrl(song: any): string {
-  if (selectedPlatform.value !== 'bilibili') return ''
-
-  const raw = String(song?.webpage_url || song?.arcurl || song?.url || '').trim()
-  if (raw.startsWith('//')) return `https:${raw}`
-  if (raw.startsWith('http://') || raw.startsWith('https://')) return raw
-
-  const videoId = getBilibiliVideoId(song)
-  return videoId ? `https://www.bilibili.com/video/${videoId}` : ''
-}
-
-function parseMetricCount(value: any): number | null {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-    return value
-  }
-
-  const raw = String(value ?? '').replace(/,/g, '').trim()
-  if (!raw) return null
-
-  const parsed = Number(raw)
-  if (!Number.isFinite(parsed) || parsed < 0) return null
-  return parsed
-}
-
-function getBilibiliMetric(song: any, key: 'likes' | 'favorites' | 'coins'): number | null {
-  const aliases: Record<'likes' | 'favorites' | 'coins', string[]> = {
-    likes: ['likes', 'like'],
-    favorites: ['favorites', 'favorite'],
-    coins: ['coins', 'coin'],
-  }
-
-  for (const field of aliases[key]) {
-    const value = parseMetricCount(song?.[field])
-    if (value !== null) return value
-  }
-
-  return null
-}
-
-function formatCompactCount(value: number | null): string {
-  if (value === null) return '--'
-  if (value < 10000) return String(value)
-  if (value < 100000000) {
-    const formatted = (value / 10000).toFixed(value >= 100000 ? 0 : 1)
-    return `${formatted.replace(/\.0$/, '')}万`
-  }
-  const formatted = (value / 100000000).toFixed(value >= 1000000000 ? 0 : 1)
-  return `${formatted.replace(/\.0$/, '')}亿`
+  const albumMid = String(song?.album?.pmid || song?.album?.mid || song?.albummid || '').trim()
+  return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ''
 }
 
 function getSongDurationMs(song: any): number | undefined {
-  if (selectedPlatform.value === 'qqmusic') {
-    if (typeof song?.interval === 'number' && Number.isFinite(song.interval) && song.interval > 0) {
-      return song.interval * 1000
-    }
-    return parseDurationToMs(song?.duration)
+  if (typeof song?.interval === 'number' && Number.isFinite(song.interval) && song.interval > 0) {
+    return song.interval * 1000
   }
-  if (selectedPlatform.value === 'bilibili') {
-    return parseDurationToMs(song?.duration_ms ?? song?.duration)
-  }
-  return undefined
+  return parseDurationToMs(song?.duration)
 }
 
 function formatSongDuration(song: any): string {
@@ -378,12 +249,6 @@ function formatSongDuration(song: any): string {
 }
 
 function getSearchPlaceholder(): string {
-  if (selectedPlatform.value === 'bilibili') {
-    return '搜索B站视频、UP主或关键词...'
-  }
-  if (selectedPlatform.value === 'qqmusic') {
-    return '搜索QQ音乐歌曲、歌手或专辑...'
-  }
   return '搜索QQ音乐歌曲、歌手或专辑...'
 }
 
@@ -401,7 +266,6 @@ function handleBlur() {
   // 延迟隐藏建议，允许点击建议项
   setTimeout(() => {
     isSearchFocused.value = false
-    showSuggestions.value = false
   }, 200)
 }
 
@@ -421,38 +285,8 @@ onMounted(() => {
         搜索媒体
       </h1>
       
-      <!-- Platform selector -->
-      <div class="mb-4 flex items-center justify-between">
+      <div class="mb-4 flex justify-end">
         <div class="flex items-center gap-2">
-          <span class="text-sm font-medium text-gray-700">媒体平台:</span>
-          <div class="flex bg-gray-100 rounded-lg p-1">
-            <button
-              @click="selectedPlatform = 'qqmusic'"
-              :class="[
-                'px-3 py-1.5 text-sm font-medium rounded-md transition-all duration-200',
-                selectedPlatform === 'qqmusic' 
-                  ? 'bg-white text-blue-600 shadow-sm' 
-                  : 'text-gray-600 hover:text-gray-900'
-              ]"
-            >
-              QQ音乐
-            </button>
-            <button
-              @click="selectedPlatform = 'bilibili'"
-              :class="[
-                'px-3 py-1.5 text-sm font-medium rounded-md transition-all duration-200',
-                selectedPlatform === 'bilibili' 
-                  ? 'bg-white text-blue-600 shadow-sm' 
-                  : 'text-gray-600 hover:text-gray-900'
-              ]"
-            >
-              B站视频
-            </button>
-          </div>
-        </div>
-        
-        <!-- QQ Music Config Status -->
-        <div v-if="selectedPlatform === 'qqmusic'" class="flex items-center gap-2">
           <div v-if="qqMusicConfigured" class="flex items-center gap-2 text-sm text-green-600">
             <User :size="16" />
             <span>已配置</span>
@@ -558,7 +392,7 @@ onMounted(() => {
              <Search :size="32" />
            </div>
            <h2 class="text-lg font-bold text-gray-900">开始搜索内容</h2>
-           <p class="text-gray-500 text-sm mt-1">点歌、找视频、直接播放</p>
+           <p class="text-gray-500 text-sm mt-1">搜索歌曲、加入队列或直接播放</p>
         </div>
         
       </div>
@@ -572,132 +406,8 @@ onMounted(() => {
           </span>
         </div>
         
-        <div
-          v-if="selectedPlatform === 'bilibili'"
-          class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 px-1"
-        >
-          <div
-            v-for="(song, index) in songs"
-            :key="getSongKey(song)"
-            class="group bg-white rounded-2xl border border-gray-100 shadow-sm hover:shadow-xl hover:shadow-pink-500/10 hover:-translate-y-1.5 transition-all duration-300 overflow-hidden flex flex-col relative"
-          >
-            <!-- Thumbnail Area -->
-            <div class="relative aspect-video overflow-hidden bg-gray-100">
-              <img 
-                v-if="getSongArtwork(song)"
-                :src="getSongArtwork(song)"
-                :alt="getSongTitle(song)"
-                class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
-              />
-              <div v-else class="w-full h-full flex items-center justify-center bg-gray-200">
-                <Music :size="32" class="text-gray-400" />
-              </div>
-              
-              <!-- Duration Badge -->
-              <div class="absolute bottom-2 right-2 px-2 py-1 bg-black/60 backdrop-blur-md text-white text-[10px] font-mono rounded-md z-10">
-                {{ formatSongDuration(song) }}
-              </div>
 
-              <!-- Play Overlay -->
-              <div 
-                class="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center cursor-pointer backdrop-blur-[2px]"
-                @click="enqueue(song, true)"
-              >
-                <div class="w-14 h-14 bg-white/95 rounded-full flex items-center justify-center shadow-2xl transform scale-75 group-hover:scale-100 transition-transform duration-500 ease-out">
-                  <Play :size="24" class="text-[#fb7299] ml-1" fill="currentColor" />
-                </div>
-              </div>
-
-              <!-- Platform Icon (Top Left) -->
-              <div class="absolute top-2 left-2 bg-white/95 backdrop-blur-sm p-1.5 rounded-lg shadow-sm border border-pink-100/50">
-                <Tv :size="14" class="text-[#fb7299]" />
-              </div>
-            </div>
-
-            <!-- Content Area -->
-            <div class="p-4 flex-1 flex flex-col">
-              <h4 
-                class="font-bold text-gray-900 line-clamp-2 text-sm leading-snug mb-3 group-hover:text-[#fb7299] transition-colors h-10"
-                :title="getSongTitle(song)"
-              >
-                {{ getSongTitle(song) }}
-              </h4>
-              
-              <div class="flex items-center gap-2 mb-4">
-                <div class="w-6 h-6 rounded-full bg-pink-50 flex items-center justify-center text-[10px] font-bold text-[#fb7299] shrink-0 border border-pink-100">
-                  <User :size="12" />
-                </div>
-                <span class="text-xs text-gray-600 font-medium truncate" :title="getSongArtist(song)">
-                  {{ getSongArtist(song) }}
-                </span>
-              </div>
-
-              <!-- Metrics -->
-              <div class="flex items-center gap-4 text-[11px] text-gray-400 mb-5 border-t border-gray-50 pt-3">
-                <div class="flex items-center gap-1.5 hover:text-[#fb7299] transition-colors" title="点赞">
-                  <ThumbsUp :size="12" />
-                  <span>{{ formatCompactCount(getBilibiliMetric(song, 'likes')) }}</span>
-                </div>
-                <div class="flex items-center gap-1.5 hover:text-yellow-500 transition-colors" title="收藏">
-                  <Star :size="12" />
-                  <span>{{ formatCompactCount(getBilibiliMetric(song, 'favorites')) }}</span>
-                </div>
-                <div class="flex items-center gap-1.5 hover:text-blue-400 transition-colors" title="投币">
-                  <Coins :size="12" />
-                  <span>{{ formatCompactCount(getBilibiliMetric(song, 'coins')) }}</span>
-                </div>
-              </div>
-
-              <!-- Actions -->
-              <div class="mt-auto flex items-center gap-2">
-                <button
-                  @click="enqueue(song, true)"
-                  class="flex-1 bg-gray-900 hover:bg-[#fb7299] text-white py-2.5 rounded-xl text-xs font-bold transition-all duration-300 flex items-center justify-center gap-2 shadow-sm active:scale-95"
-                >
-                  <Play :size="14" fill="currentColor" />
-                  立即播放
-                </button>
-                
-                <div class="flex gap-2">
-                  <button
-                    @click="enqueue(song, false)"
-                    class="p-2.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-xl border border-gray-100 transition-all duration-200 active:scale-90"
-                    title="添加到队列"
-                  >
-                    <Plus :size="18" />
-                  </button>
-                  
-                  <a
-                    v-if="getSongWebpageUrl(song)"
-                    :href="getSongWebpageUrl(song)"
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    @click.stop
-                    class="p-2.5 text-gray-500 hover:text-[#fb7299] hover:bg-pink-50 rounded-xl border border-gray-100 transition-all duration-200 active:scale-90"
-                    title="查看原视频"
-                  >
-                    <ExternalLink :size="18" />
-                  </a>
-
-                  <button
-                    @click.stop="toggleLocalFav(song)"
-                    :class="[
-                      'p-2.5 rounded-xl border border-gray-100 transition-all duration-200 active:scale-90',
-                      isLocalFav(song)
-                        ? 'bg-pink-50 text-pink-600 border-pink-100'
-                        : 'text-gray-500 hover:text-pink-600 hover:bg-pink-50'
-                    ]"
-                    :title="isLocalFav(song) ? '取消本地收藏' : '本地收藏'"
-                  >
-                    <Heart :size="18" :fill="isLocalFav(song) ? 'currentColor' : 'none'" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div v-else class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
           <table class="w-full text-left border-collapse">
             <thead class="bg-gray-50/50 text-gray-400 text-xs uppercase font-semibold border-b border-gray-100 hidden md:table-header-group">
               <tr>
@@ -760,18 +470,6 @@ onMounted(() => {
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right">
                   <div class="flex items-center justify-end gap-2 md:opacity-0 group-hover:opacity-100 transition-all duration-200 md:transform md:translate-x-2 group-hover:translate-x-0">
-                    <a
-                      v-if="getSongWebpageUrl(song)"
-                      :href="getSongWebpageUrl(song)"
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      @click.stop
-                      class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                      title="打开原页"
-                    >
-                      <ExternalLink :size="18" />
-                    </a>
-
                     <button
                       @click="enqueue(song, false)"
                       class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"

@@ -286,10 +286,8 @@ const router = useRouter()
 interface Track {
   id: number
   track_id?: string
-  source?: 'qqmusic' | 'bilibili'
+  source?: 'qqmusic'
   song_mid?: string
-  video_id?: string
-  webpage_url?: string
   title: string
   artist: string
   album?: string
@@ -621,8 +619,6 @@ async function loadQueue() {
           track_id: matchedTrack.track_id,
           source: matchedTrack.source,
           song_mid: matchedTrack.song_mid,
-          video_id: matchedTrack.video_id,
-          webpage_url: matchedTrack.webpage_url,
         }
         isLiked.value = isFavoriteSong(currentTrack.value)
       }
@@ -638,8 +634,6 @@ async function toggleLike() {
     source: currentTrack.value.source,
     track_id: currentTrack.value.track_id,
     song_mid: currentTrack.value.song_mid,
-    video_id: currentTrack.value.video_id,
-    webpage_url: currentTrack.value.webpage_url,
     name: currentTrack.value.title,
     artist: currentTrack.value.artist,
     album: currentTrack.value.album,
@@ -680,8 +674,6 @@ async function loadPlayerState() {
         track_id: matchedTrack?.track_id,
         source: matchedTrack?.source,
         song_mid: matchedTrack?.song_mid,
-        video_id: matchedTrack?.video_id,
-        webpage_url: matchedTrack?.webpage_url,
         title: state.now_playing_title,
         artist: state.now_playing_artist || 'Unknown Artist',
         album: state.now_playing_album,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 import hashlib
-from html import unescape
 import hmac
 import math
 import os
@@ -13,7 +12,6 @@ import time
 import uuid
 from pathlib import Path
 
-import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -21,16 +19,6 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .bilibili_cache import audio_cache_usage, clear_audio_cache, prune_audio_cache
-from .bilibili_auth import (
-    close_all_bilibili_qr_sessions,
-    cookie_string_to_dict,
-    fetch_bilibili_subtitle_candidates_via_playwright,
-    is_playwright_available,
-    is_playwright_runtime_available,
-    poll_bilibili_qr_login_session,
-    start_bilibili_qr_login_session,
-)
 from .crypto import decrypt_text, encrypt_text
 from .db import create_db_and_tables, get_database_url, get_session, get_sqlite_db_path, new_session
 from .models import AdminCredential, HistoryItem, QueueItem, Secret
@@ -74,31 +62,6 @@ app.add_middleware(
 qqmusic = QQMusicClient()
 voice = VoiceClient()
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-BILIBILI_AUDIO_DIR = REPO_ROOT / "tmp" / "bilibili_audio"
-BILIBILI_AUDIO_CACHE_TTL_SECONDS = max(0, settings.bilibili_audio_cache_ttl_hours) * 3600
-BILIBILI_AUDIO_CACHE_MAX_BYTES = max(0, settings.bilibili_audio_cache_max_mb) * 1024 * 1024
-BILIBILI_AUDIO_PARTIAL_TTL_SECONDS = max(0, settings.bilibili_audio_partial_ttl_minutes) * 60
-_BILIBILI_VIDEO_ID_RE = re.compile(r"(BV[0-9A-Za-z]+|av\d+)", re.IGNORECASE)
-_BILIBILI_TAG_RE = re.compile(r"<[^>]+>")
-_BILIBILI_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
-_BILIBILI_LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
-_BILIBILI_DEFAULT_HEADERS = {
-    "user-agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
-    ),
-    "referer": "https://www.bilibili.com/",
-    "accept": "application/json, text/plain, */*",
-}
-_bilibili_download_locks: dict[str, asyncio.Lock] = {}
-_BILIBILI_VIEW_SUMMARY_CACHE_TTL_S = 600.0
-_BILIBILI_VIEW_SUMMARY_CONCURRENCY = 6
-_bilibili_view_summary_cache: dict[str, tuple[float, dict[str, object]]] = {}
-_bilibili_view_summary_semaphore = asyncio.Semaphore(_BILIBILI_VIEW_SUMMARY_CONCURRENCY)
-_BILIBILI_SUBTITLE_CACHE_TTL_S = 1800.0
-_bilibili_subtitle_cache: dict[str, tuple[float, list[LyricLine]]] = {}
 _QQMUSIC_QUEUE_META_PREFIX = "__qqmusic_quality__:"
 
 # Add OPTIONS handler for CORS preflight requests
@@ -210,16 +173,6 @@ class AddQQMusicQueueRequest(BaseModel):
     duration_ms: int | None = None
 
 
-class AddBilibiliQueueRequest(BaseModel):
-    video_id: str
-    title: str
-    artist: str = ""
-    album: str = ""
-    duration_ms: int | None = None
-    cover_url: str = ""
-    play_now: bool = False
-
-
 class VolumeUpdateRequest(BaseModel):
     volume_percent: int
 
@@ -230,10 +183,6 @@ class AudioFxUpdateRequest(BaseModel):
     swap_lr: bool | None = None
     bass_db: float | None = None
     reverb_mix: float | None = None
-
-
-class AdminCookieSetRequest(BaseModel):
-    cookie: str
 
 
 class TSClientDescriptionRequest(BaseModel):
@@ -248,7 +197,6 @@ class ExternalQueueRequest(BaseModel):
     source: str = "qqmusic"
     keywords: str = ""
     song_mid: str = ""
-    video_id: str = ""
     title: str = ""
     artist: str = ""
     album: str = ""
@@ -299,6 +247,18 @@ def _record_login_failure(request: Request) -> None:
     _login_attempts[key] = (failures, time.monotonic() + delay if delay else 0.0)
 
 
+def _remove_legacy_bilibili_queue_items(session: Session) -> int:
+    """Discard queue entries that cannot be played after the source removal."""
+    result = session.execute(
+        delete(QueueItem).where(QueueItem.track_id.startswith("bilibili:"))
+    )
+    removed_count = int(result.rowcount or 0)
+    if removed_count:
+        session.commit()
+        logger.info("removed %s queued entries from the retired music source", removed_count)
+    return removed_count
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     global _chat_task
@@ -309,6 +269,7 @@ async def _startup() -> None:
     try:
         initialize_admin(bootstrap_session)
         initialize_runtime_settings(bootstrap_session)
+        _remove_legacy_bilibili_queue_items(bootstrap_session)
     finally:
         bootstrap_session.close()
 
@@ -336,7 +297,6 @@ async def _shutdown() -> None:
     if _chat_task is not None:
         _chat_task.cancel()
         _chat_task = None
-    await close_all_bilibili_qr_sessions()
     await voice.close()
 
 
@@ -538,28 +498,6 @@ async def _clear_pending_queue_item_if_match(item_id: int | None) -> bool:
         return True
 
 
-def _get_bilibili_duration_limit_ms() -> int | None:
-    limit_minutes = int(getattr(settings, "bilibili_max_duration_minutes", 0) or 0)
-    if limit_minutes <= 0:
-        return None
-    return limit_minutes * 60 * 1000
-
-
-def _ensure_bilibili_duration_allowed(duration_ms: int | None, *, video_id: str, title: str = "") -> None:
-    limit_ms = _get_bilibili_duration_limit_ms()
-    resolved_duration_ms = _coerce_positive_int(duration_ms)
-    if limit_ms is None or resolved_duration_ms is None or resolved_duration_ms <= limit_ms:
-        return
-
-    actual_minutes = math.ceil(resolved_duration_ms / 60000)
-    limit_minutes = math.ceil(limit_ms / 60000)
-    label = (title or video_id).strip() or video_id
-    raise HTTPException(
-        status_code=400,
-        detail=f"B站视频时长过长，已拒绝播放: {label} ({actual_minutes} 分钟，超过 {limit_minutes} 分钟上限)",
-    )
-
-
 async def _mark_playback_paused() -> None:
     global _paused_at
     async with _playback_lock:
@@ -608,40 +546,6 @@ def _resolve_playback_position_s(*, now_s: float, started_at: float, paused_at: 
     return max(0.0, pos)
 
 
-async def _hydrate_bilibili_track_metadata(
-    *,
-    video_id: str,
-    title: str,
-    artist: str = "",
-    album: str = "",
-    artwork_url: str = "",
-    duration_ms: int | None = None,
-) -> tuple[int | None, str, str, str]:
-    resolved_duration_ms = _coerce_positive_int(duration_ms)
-    resolved_artist = (artist or "").strip()
-    resolved_album = (album or "").strip()
-    resolved_artwork_url = (artwork_url or "").strip()
-
-    if (
-        resolved_duration_ms is None
-        or not resolved_artist
-        or not resolved_album
-        or not resolved_artwork_url
-    ):
-        metadata = await _extract_bilibili_video_info(video_id)
-        if resolved_duration_ms is None:
-            resolved_duration_ms = _coerce_positive_int((metadata or {}).get("duration_ms"))
-        if not resolved_artist:
-            resolved_artist = str((metadata or {}).get("artist") or "").strip()
-        if not resolved_album:
-            resolved_album = str((metadata or {}).get("album") or "").strip()
-        if not resolved_artwork_url:
-            resolved_artwork_url = str((metadata or {}).get("artwork_url") or "").strip()
-
-    _ensure_bilibili_duration_allowed(resolved_duration_ms, video_id=video_id, title=title)
-    return resolved_duration_ms, resolved_artist, resolved_album, resolved_artwork_url
-
-
 async def _play_queue_item_internal(item_id: int, *, requested_by: str) -> bool:
     global _current_shuffle_index
 
@@ -681,40 +585,6 @@ async def _play_queue_item_internal(item_id: int, *, requested_by: str) -> bool:
                 return True
 
             item.source_url = _encode_qqmusic_queue_source(quality, playback_source_url)
-            session.add(item)
-            session.commit()
-        elif item.track_id.startswith("bilibili:"):
-            video_id = item.track_id.split(":", 1)[1]
-            duration_ms, artist, album, artwork_url = await _hydrate_bilibili_track_metadata(
-                video_id=video_id,
-                title=str(item.title or ""),
-                artist=artist,
-                album=album,
-                artwork_url=artwork_url,
-                duration_ms=duration_ms,
-            )
-
-            if not await _is_play_request_current(play_request_generation):
-                return True
-
-            playback_source_url, duration_ms, artist, album, artwork_url = await _resolve_bilibili_playback_payload(
-                video_id=video_id,
-                artist=artist,
-                album=album,
-                artwork_url=artwork_url,
-                duration_ms=duration_ms,
-            )
-
-            if not await _is_play_request_current(play_request_generation):
-                return True
-
-            item.source_url = playback_source_url
-            item.album = album
-            item.duration = duration_ms
-            item.cover_url = artwork_url
-            if artist:
-                item.artist = artist
-
             session.add(item)
             session.commit()
         else:
@@ -823,9 +693,6 @@ _QUEUE_CONFIGURATION_ERROR_DETAILS = frozenset({
 })
 _MALFORMED_QUEUE_ITEM_MARKERS = (
     "qqmusic song_mid is empty",
-    "video_id is empty",
-    "invalid bilibili video_id",
-    "b站视频时长过长",
 )
 
 
@@ -966,7 +833,7 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
         raise
     if not played:
         # A row may disappear between selection and playback. Do not let the
-        # stale queue position block all subsequent QQ Music/Bilibili items.
+        # A stale queue position must not block later playable items.
         await _skip_unplayable_queue_item(item_id, reason="队列歌曲已不存在或不可播放")
 
 
@@ -1001,11 +868,6 @@ def _build_track_reference(track_id: str) -> dict[str, object]:
     payload: dict[str, object] = {"source": source}
     if source == "qqmusic" and suffix:
         payload["song_mid"] = suffix
-    elif source == "bilibili":
-        video_id = _extract_bilibili_video_id(suffix or raw)
-        if video_id:
-            payload["video_id"] = video_id
-            payload["webpage_url"] = _build_bilibili_video_url(video_id)
     return payload
 
 
@@ -1233,1179 +1095,6 @@ async def _load_qqmusic_playlist_tracks(playlist_id: str) -> tuple[str, list[dic
         session.close()
     qqmusic.set_cookie(qq_cookie)
     return _extract_qqmusic_playlist_tracks(await qqmusic.get_song_list(playlist_id))
-
-
-def _get_bilibili_download_lock(video_id: str) -> asyncio.Lock:
-    lock = _bilibili_download_locks.get(video_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _bilibili_download_locks[video_id] = lock
-    return lock
-
-
-def _clean_bilibili_text(value: object) -> str:
-    text = unescape(str(value or "")).strip()
-    if not text:
-        return ""
-    text = _BILIBILI_TAG_RE.sub("", text)
-    return " ".join(text.split())
-
-
-def _normalize_bilibili_artwork_url(value: object) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    if raw.startswith("//"):
-        return f"https:{raw}"
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return raw
-    return f"https://{raw.lstrip('/')}"
-
-
-def _normalize_bilibili_subtitle_url(value: object) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    if raw.startswith("//"):
-        return f"https:{raw}"
-    if raw.startswith("http://"):
-        return f"https://{raw[len('http://'):]}"
-    if raw.startswith("https://"):
-        return raw
-    return f"https://{raw.lstrip('/')}"
-
-
-def _count_bilibili_cjk_chars(value: str) -> int:
-    return len(_BILIBILI_CJK_CHAR_RE.findall(value or ""))
-
-
-def _count_bilibili_latin_chars(value: str) -> int:
-    return len(_BILIBILI_LATIN_CHAR_RE.findall(value or ""))
-
-
-def _infer_bilibili_subtitle_preference(*values: object) -> str:
-    text = " ".join(_clean_bilibili_text(value) for value in values if str(value or "").strip())
-    if not text:
-        return "neutral"
-
-    latin_count = _count_bilibili_latin_chars(text)
-    cjk_count = _count_bilibili_cjk_chars(text)
-
-    if latin_count >= max(6, cjk_count * 2):
-        return "english"
-    if cjk_count >= max(2, latin_count):
-        return "chinese"
-    return "neutral"
-
-
-def _classify_bilibili_subtitle_language(meta: dict) -> str:
-    tokens = " ".join(
-        str(meta.get(key) or "").strip()
-        for key in ("lan", "lan_doc", "lang", "language")
-    )
-    lower_tokens = tokens.lower()
-
-    if any(token in tokens for token in ("中英", "双语", "双語")) or "bilingual" in lower_tokens:
-        return "bilingual"
-    if any(token in tokens for token in ("英文", "英语", "英語")):
-        return "english"
-    if any(token in tokens for token in ("中文", "汉语", "漢語", "普通话", "普通話", "国语", "國語")):
-        return "chinese"
-    if re.search(r"(^|[^a-z])en([^a-z]|$)", lower_tokens) or "english" in lower_tokens:
-        return "english"
-    if re.search(r"(^|[^a-z])(zh|cn|cmn)([^a-z]|$)", lower_tokens) or "chinese" in lower_tokens:
-        return "chinese"
-    return "unknown"
-
-
-def _classify_bilibili_subtitle_content_language(lines: list[LyricLine]) -> str:
-    if not lines:
-        return "unknown"
-
-    sample = " ".join(line.text for line in lines[:12]).strip()
-    if not sample:
-        return "unknown"
-
-    latin_count = _count_bilibili_latin_chars(sample)
-    cjk_count = _count_bilibili_cjk_chars(sample)
-
-    if latin_count >= max(8, cjk_count * 2):
-        return "english"
-    if cjk_count >= max(4, latin_count * 2):
-        return "chinese"
-    if latin_count > 0 and cjk_count > 0:
-        return "mixed"
-    return "unknown"
-
-
-def _score_bilibili_subtitle_candidate(candidate: dict, preference: str) -> float:
-    score = 0.0
-    language_hint = str(candidate.get("language_hint") or "unknown")
-    content_language = str(candidate.get("content_language") or "unknown")
-    is_auto = bool(candidate.get("is_auto"))
-    line_count = _coerce_non_negative_int(candidate.get("line_count")) or 0
-    order_index = _coerce_non_negative_int(candidate.get("order_index")) or 0
-
-    if preference == "english":
-        if language_hint == "english":
-            score += 70
-        elif language_hint == "bilingual":
-            score += 35
-        elif language_hint == "chinese":
-            score -= 25
-
-        if content_language == "english":
-            score += 120
-        elif content_language == "mixed":
-            score += 30
-        elif content_language == "chinese":
-            score -= 50
-    elif preference == "chinese":
-        if language_hint == "chinese":
-            score += 70
-        elif language_hint == "bilingual":
-            score += 30
-        elif language_hint == "english":
-            score -= 15
-
-        if content_language == "chinese":
-            score += 100
-        elif content_language == "mixed":
-            score += 25
-        elif content_language == "english":
-            score -= 25
-    else:
-        if content_language in {"english", "chinese"}:
-            score += 20
-        elif content_language == "mixed":
-            score += 10
-        if language_hint in {"english", "chinese", "bilingual"}:
-            score += 10
-
-    if is_auto:
-        score -= 3
-    else:
-        score += 6
-
-    score += min(line_count, 240) / 40.0
-    score -= order_index * 0.1
-    return score
-
-
-def _parse_bilibili_subtitle_body_to_lines(body: list[dict]) -> list[LyricLine]:
-    lyrics: list[LyricLine] = []
-    for entry in body:
-        if not isinstance(entry, dict):
-            continue
-
-        text = _clean_bilibili_text(
-            str(entry.get("content") or entry.get("subtitle") or entry.get("text") or "").replace("\n", " / ")
-        )
-        if not text:
-            continue
-
-        raw_time = entry.get("from")
-        if raw_time is None:
-            raw_time = entry.get("start")
-
-        try:
-            time_s = float(raw_time)
-        except (TypeError, ValueError):
-            continue
-
-        if not math.isfinite(time_s) or time_s < 0:
-            continue
-
-        if lyrics and abs(lyrics[-1].time - time_s) < 0.001 and lyrics[-1].text == text:
-            continue
-
-        lyrics.append(LyricLine(time=time_s, text=text))
-
-    lyrics.sort(key=lambda line: line.time)
-    return lyrics
-
-
-def _parse_bilibili_duration_ms(value: object) -> int | None:
-    if isinstance(value, (int, float)):
-        seconds = int(float(value))
-        return seconds * 1000 if seconds > 0 else None
-
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    if raw.isdigit():
-        seconds = int(raw)
-        return seconds * 1000 if seconds > 0 else None
-
-    parts = raw.split(":")
-    try:
-        numbers = [int(part) for part in parts]
-    except ValueError:
-        return None
-    if not numbers:
-        return None
-
-    seconds = 0
-    for number in numbers:
-        seconds = seconds * 60 + number
-    return seconds * 1000 if seconds > 0 else None
-
-
-def _extract_bilibili_video_id(value: object) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    match = _BILIBILI_VIDEO_ID_RE.search(raw)
-    if not match:
-        return ""
-    token = match.group(1)
-    if token.lower().startswith("bv"):
-        return f"BV{token[2:]}"
-    if token.lower().startswith("av"):
-        return token.lower()
-    return token
-
-
-def _build_bilibili_video_url(video_id: str) -> str:
-    raw = (video_id or "").strip()
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return raw
-    if raw.isdigit():
-        raw = f"av{raw}"
-    if raw.lower().startswith("av"):
-        return f"https://www.bilibili.com/video/{raw.lower()}"
-    if raw.lower().startswith("bv"):
-        raw = f"BV{raw[2:]}"
-    return f"https://www.bilibili.com/video/{raw}"
-
-
-def _normalize_bilibili_search_item(item: dict) -> dict | None:
-    video_id = _extract_bilibili_video_id(item.get("bvid") or item.get("arcurl") or item.get("aid"))
-    if not video_id:
-        return None
-
-    aid = _coerce_positive_int(item.get("aid") or item.get("id"))
-    normalized = {
-        "source": "bilibili",
-        "track_id": f"bilibili:{video_id}",
-        "video_id": video_id,
-        "title": _clean_bilibili_text(item.get("title")) or video_id,
-        "artist": _clean_bilibili_text(item.get("author") or item.get("up_name") or ""),
-        "album": _clean_bilibili_text(item.get("typename") or ""),
-        "description": _clean_bilibili_text(item.get("description") or item.get("desc") or ""),
-        "duration_ms": _parse_bilibili_duration_ms(item.get("duration")),
-        "artwork_url": _normalize_bilibili_artwork_url(item.get("pic") or item.get("thumbnail")),
-        "likes": _coerce_non_negative_int(item.get("like")),
-        "favorites": _coerce_non_negative_int(item.get("favorites")),
-        "coins": _coerce_non_negative_int(item.get("coins")),
-        "webpage_url": _build_bilibili_video_url(video_id),
-    }
-    if aid is not None:
-        normalized["id"] = aid
-    return normalized
-
-
-def _normalize_bilibili_search_items(items: list[dict]) -> list[dict]:
-    normalized_items: list[dict] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        normalized = _normalize_bilibili_search_item(item)
-        if normalized is not None:
-            normalized_items.append(normalized)
-    return normalized_items
-
-
-def _normalize_bilibili_video_info(info: dict, *, fallback_video_id: str = "") -> dict | None:
-    if not isinstance(info, dict):
-        return None
-
-    video_id = _extract_bilibili_video_id(
-        info.get("bvid")
-        or info.get("webpage_url")
-        or info.get("original_url")
-        or fallback_video_id
-        or info.get("id")
-    )
-    if not video_id:
-        return None
-
-    categories = info.get("categories") or []
-    category = ""
-    if isinstance(categories, list) and categories:
-        category = _clean_bilibili_text(categories[0])
-
-    return {
-        "source": "bilibili",
-        "track_id": f"bilibili:{video_id}",
-        "video_id": video_id,
-        "title": _clean_bilibili_text(info.get("title")) or video_id,
-        "artist": _clean_bilibili_text(
-            info.get("uploader") or info.get("channel") or info.get("artist") or info.get("creator") or ""
-        ),
-        "album": category,
-        "duration_ms": _parse_bilibili_duration_ms(info.get("duration")),
-        "artwork_url": _normalize_bilibili_artwork_url(info.get("thumbnail")),
-        "webpage_url": str(info.get("webpage_url") or _build_bilibili_video_url(video_id)).strip(),
-    }
-
-
-def _build_bilibili_api_params(video_id: str) -> dict[str, object]:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
-
-    if normalized_video_id.lower().startswith("av"):
-        aid = _coerce_positive_int(normalized_video_id[2:])
-        if aid is None:
-            raise HTTPException(status_code=400, detail="invalid bilibili aid")
-        return {"aid": aid}
-    return {"bvid": normalized_video_id}
-
-
-def _build_bilibili_request_cookies(cookie: str | None = None) -> dict[str, str]:
-    cookies = cookie_string_to_dict(str(cookie or "").strip())
-    if not cookies.get("buvid3"):
-        cookies["buvid3"] = f"{uuid.uuid4()}infoc"
-    return cookies
-
-
-def _request_bilibili_api_sync(
-    path: str,
-    params: dict[str, object],
-    *,
-    referer: str = "https://www.bilibili.com/",
-    cookie: str | None = None,
-) -> dict:
-    headers = dict(_BILIBILI_DEFAULT_HEADERS)
-    headers["referer"] = referer
-    cookies = _build_bilibili_request_cookies(cookie)
-
-    try:
-        with httpx.Client(timeout=20.0, follow_redirects=True, headers=headers, cookies=cookies) as client:
-            resp = client.get(f"https://api.bilibili.com{path}", params=params)
-            resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"bilibili api request failed: path={path} error={exc}") from exc
-
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail=f"bilibili api returned invalid json: path={path}") from exc
-
-    if int(payload.get("code") or 0) != 0:
-        raise HTTPException(status_code=502, detail=f"bilibili api failed: path={path} code={payload.get('code')}")
-
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=502, detail=f"bilibili api returned invalid data: path={path}")
-    return data
-
-
-def _fetch_bilibili_view_sync(video_id: str, *, cookie: str | None = None) -> dict:
-    params = _build_bilibili_api_params(video_id)
-    return _request_bilibili_api_sync(
-        "/x/web-interface/wbi/view",
-        params,
-        referer=_build_bilibili_video_url(video_id),
-        cookie=cookie,
-    )
-
-
-def _fetch_bilibili_nav_sync(cookie: str | None = None) -> dict:
-    headers = dict(_BILIBILI_DEFAULT_HEADERS)
-    headers["referer"] = "https://www.bilibili.com/"
-    cookies = _build_bilibili_request_cookies(cookie)
-    try:
-        with httpx.Client(timeout=20.0, follow_redirects=True, headers=headers, cookies=cookies) as client:
-            resp = client.get("https://api.bilibili.com/x/web-interface/nav")
-            resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"bilibili nav request failed: {exc}") from exc
-
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail="bilibili nav returned invalid json") from exc
-
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=502, detail="bilibili nav returned invalid data")
-    return data
-
-
-def _resolve_bilibili_primary_cid(view_data: dict) -> int | None:
-    cid = _coerce_positive_int(view_data.get("cid"))
-    if cid is not None:
-        return cid
-
-    pages = view_data.get("pages") or []
-    if isinstance(pages, list):
-        for page in pages:
-            if not isinstance(page, dict):
-                continue
-            cid = _coerce_positive_int(page.get("cid"))
-            if cid is not None:
-                return cid
-    return None
-
-
-def _normalize_bilibili_view_data(view_data: dict, *, fallback_video_id: str = "") -> dict | None:
-    if not isinstance(view_data, dict):
-        return None
-
-    video_id = _extract_bilibili_video_id(view_data.get("bvid") or fallback_video_id)
-    if not video_id:
-        aid = _coerce_positive_int(view_data.get("aid"))
-        if aid is not None:
-            video_id = f"av{aid}"
-    if not video_id:
-        return None
-
-    pages = view_data.get("pages") or []
-    first_page = pages[0] if isinstance(pages, list) and pages and isinstance(pages[0], dict) else {}
-    page_duration_s = _coerce_positive_int(first_page.get("duration"))
-    total_duration_s = _coerce_positive_int(view_data.get("duration"))
-    duration_ms = page_duration_s * 1000 if page_duration_s is not None else (
-        total_duration_s * 1000 if total_duration_s is not None else None
-    )
-
-    owner = view_data.get("owner") if isinstance(view_data.get("owner"), dict) else {}
-    category = _clean_bilibili_text(
-        view_data.get("tname")
-        or view_data.get("tname_v2")
-        or view_data.get("parent_tname")
-        or ""
-    )
-
-    return {
-        "source": "bilibili",
-        "track_id": f"bilibili:{video_id}",
-        "video_id": video_id,
-        "title": _clean_bilibili_text(view_data.get("title")) or video_id,
-        "artist": _clean_bilibili_text((owner or {}).get("name") or ""),
-        "album": category,
-        "duration_ms": duration_ms,
-        "artwork_url": _normalize_bilibili_artwork_url(view_data.get("pic")),
-        "webpage_url": _build_bilibili_video_url(video_id),
-    }
-
-
-def _normalize_bilibili_view_summary(view_data: dict, *, fallback_video_id: str = "") -> dict | None:
-    if not isinstance(view_data, dict):
-        return None
-
-    video_id = _extract_bilibili_video_id(view_data.get("bvid") or fallback_video_id)
-    if not video_id:
-        aid = _coerce_positive_int(view_data.get("aid"))
-        if aid is not None:
-            video_id = f"av{aid}"
-    if not video_id:
-        return None
-
-    stat = view_data.get("stat") if isinstance(view_data.get("stat"), dict) else {}
-    return {
-        "video_id": video_id,
-        "description": _clean_bilibili_text(view_data.get("desc") or ""),
-        "likes": _coerce_non_negative_int(stat.get("like")),
-        "favorites": _coerce_non_negative_int(stat.get("favorite")),
-        "coins": _coerce_non_negative_int(stat.get("coin")),
-    }
-
-
-async def _fetch_bilibili_view_summary(video_id: str) -> dict | None:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        return None
-
-    now = time.time()
-    cached = _bilibili_view_summary_cache.get(normalized_video_id)
-    if cached is not None and cached[0] > now:
-        return dict(cached[1])
-
-    async with _bilibili_view_summary_semaphore:
-        now = time.time()
-        cached = _bilibili_view_summary_cache.get(normalized_video_id)
-        if cached is not None and cached[0] > now:
-            return dict(cached[1])
-
-        try:
-            view_data = await asyncio.to_thread(_fetch_bilibili_view_sync, normalized_video_id)
-            summary = _normalize_bilibili_view_summary(view_data, fallback_video_id=normalized_video_id)
-        except HTTPException as exc:
-            logger.warning("failed to fetch bilibili view summary for %s: %s", normalized_video_id, exc.detail)
-            return None
-        except Exception as exc:
-            logger.warning("failed to fetch bilibili view summary for %s: %s", normalized_video_id, exc)
-            return None
-
-        if summary is None:
-            return None
-
-        _bilibili_view_summary_cache[normalized_video_id] = (
-            time.time() + _BILIBILI_VIEW_SUMMARY_CACHE_TTL_S,
-            dict(summary),
-        )
-        return summary
-
-
-async def _enrich_bilibili_search_item(item: dict) -> dict:
-    if not isinstance(item, dict):
-        return item
-
-    summary = await _fetch_bilibili_view_summary(str(item.get("video_id") or ""))
-    if summary is None:
-        return item
-
-    enriched = dict(item)
-    if summary.get("description"):
-        enriched["description"] = summary["description"]
-    for key in ("likes", "favorites", "coins"):
-        value = summary.get(key)
-        if value is not None:
-            enriched[key] = value
-    return enriched
-
-
-async def _enrich_bilibili_search_items(items: list[dict]) -> list[dict]:
-    if not items:
-        return []
-    return list(await asyncio.gather(*(_enrich_bilibili_search_item(item) for item in items)))
-
-
-def _fetch_bilibili_playurl_sync(video_id: str, cid: int, *, dash: bool = False) -> dict:
-    params = _build_bilibili_api_params(video_id)
-    params.update({
-        "cid": int(cid),
-        "qn": 64,
-        "fnver": 0,
-        "fnval": 16 if dash else 0,
-        "fourk": 0,
-    })
-    return _request_bilibili_api_sync("/x/player/playurl", params, referer=_build_bilibili_video_url(video_id))
-
-
-def _fetch_bilibili_web_view_sync(video_id: str, *, cookie: str | None = None) -> dict:
-    params = _build_bilibili_api_params(video_id)
-    return _request_bilibili_api_sync(
-        "/x/web-interface/view",
-        params,
-        referer=_build_bilibili_video_url(video_id),
-        cookie=cookie,
-    )
-
-
-def _extract_bilibili_subtitle_catalog(player_data: dict) -> list[dict]:
-    subtitle_data = player_data.get("subtitle") if isinstance(player_data.get("subtitle"), dict) else {}
-    raw_subtitles = subtitle_data.get("subtitles") or subtitle_data.get("list") or []
-    if not isinstance(raw_subtitles, list):
-        return []
-
-    subtitles: list[dict] = []
-    for index, raw_subtitle in enumerate(raw_subtitles):
-        if not isinstance(raw_subtitle, dict):
-            continue
-
-        subtitle_url = _normalize_bilibili_subtitle_url(
-            raw_subtitle.get("subtitle_url") or raw_subtitle.get("url") or ""
-        )
-        if not subtitle_url:
-            continue
-
-        lan = str(raw_subtitle.get("lan") or "").strip()
-        lan_doc = str(raw_subtitle.get("lan_doc") or raw_subtitle.get("lang") or "").strip()
-        lowered_label = f"{lan} {lan_doc}".lower()
-        subtitles.append(
-            {
-                "subtitle_url": subtitle_url,
-                "lan": lan,
-                "lan_doc": lan_doc,
-                "order_index": index,
-                "is_auto": lan.lower().startswith("ai-")
-                or "自动" in lan_doc
-                or "auto" in lowered_label,
-            }
-        )
-    return subtitles
-
-
-def _fetch_bilibili_player_subtitle_catalog_sync(
-    video_id: str,
-    *,
-    aid: int,
-    cid: int,
-    cookie: str | None = None,
-) -> list[dict]:
-    referer = _build_bilibili_video_url(video_id)
-    params = {"aid": int(aid), "cid": int(cid)}
-    last_exc: HTTPException | None = None
-    saw_success = False
-
-    for path in ("/x/player/wbi/v2", "/x/player/v2"):
-        try:
-            player_data = _request_bilibili_api_sync(path, params, referer=referer, cookie=cookie)
-        except HTTPException as exc:
-            last_exc = exc
-            logger.warning("failed to fetch bilibili subtitle catalog for %s via %s: %s", video_id, path, exc.detail)
-            continue
-
-        saw_success = True
-        subtitles = _extract_bilibili_subtitle_catalog(player_data)
-        if subtitles:
-            return subtitles
-
-    if not saw_success and last_exc is not None:
-        raise last_exc
-    return []
-
-
-def _fetch_bilibili_subtitle_catalog_sync(video_id: str, *, cookie: str | None = None) -> list[dict]:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
-
-    try:
-        view_data = _fetch_bilibili_web_view_sync(normalized_video_id, cookie=cookie)
-    except HTTPException:
-        view_data = _fetch_bilibili_view_sync(normalized_video_id, cookie=cookie)
-
-    aid = _coerce_positive_int(view_data.get("aid"))
-    if aid is None and normalized_video_id.lower().startswith("av"):
-        aid = _coerce_positive_int(normalized_video_id[2:])
-    cid = _resolve_bilibili_primary_cid(view_data)
-    if aid is None or cid is None:
-        return []
-
-    return _fetch_bilibili_player_subtitle_catalog_sync(normalized_video_id, aid=aid, cid=cid, cookie=cookie)
-
-
-def _fetch_bilibili_subtitle_body_sync(subtitle_url: str, *, video_id: str, cookie: str | None = None) -> list[dict]:
-    url = _normalize_bilibili_subtitle_url(subtitle_url)
-    if not url:
-        return []
-
-    headers = dict(_BILIBILI_DEFAULT_HEADERS)
-    headers["referer"] = _build_bilibili_video_url(video_id)
-    cookies = _build_bilibili_request_cookies(cookie)
-    try:
-        with httpx.Client(timeout=20.0, follow_redirects=True, headers=headers, cookies=cookies) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"bilibili subtitle request failed: {exc}") from exc
-
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail="bilibili subtitle returned invalid json") from exc
-
-    body = payload.get("body") if isinstance(payload, dict) else None
-    if not isinstance(body, list):
-        return []
-    return [entry for entry in body if isinstance(entry, dict)]
-
-
-def _resolve_bilibili_lyrics_from_candidates_sync(
-    video_id: str,
-    subtitles: list[dict],
-    *,
-    title: str = "",
-    artist: str = "",
-    cookie: str | None = None,
-) -> list[LyricLine]:
-    if not subtitles:
-        return []
-
-    preference = _infer_bilibili_subtitle_preference(title, artist)
-    candidates: list[dict] = []
-    for subtitle in subtitles:
-        body = subtitle.get("body") if isinstance(subtitle.get("body"), list) else None
-        if body is None:
-            try:
-                body = _fetch_bilibili_subtitle_body_sync(
-                    str(subtitle.get("subtitle_url") or ""),
-                    video_id=video_id,
-                    cookie=cookie,
-                )
-            except HTTPException as exc:
-                logger.warning(
-                    "failed to fetch bilibili subtitle for %s (%s): %s",
-                    video_id,
-                    subtitle.get("lan") or subtitle.get("lan_doc") or "unknown",
-                    exc.detail,
-                )
-                continue
-
-        lyrics = _parse_bilibili_subtitle_body_to_lines(body)
-        if not lyrics:
-            continue
-
-        candidate = dict(subtitle)
-        candidate["lyrics"] = lyrics
-        candidate["line_count"] = len(lyrics)
-        candidate["language_hint"] = _classify_bilibili_subtitle_language(candidate)
-        candidate["content_language"] = _classify_bilibili_subtitle_content_language(lyrics)
-        candidate["score"] = _score_bilibili_subtitle_candidate(candidate, preference)
-        candidates.append(candidate)
-
-    if not candidates:
-        return []
-
-    clean_title = _clean_bilibili_text(title)
-    title_latin_count = _count_bilibili_latin_chars(clean_title)
-    title_cjk_count = _count_bilibili_cjk_chars(clean_title)
-    if title_latin_count >= 4:
-        for candidate in candidates:
-            if candidate.get("content_language") == "english":
-                candidate["score"] = float(candidate.get("score") or 0.0) + 25.0
-            elif candidate.get("language_hint") == "english":
-                candidate["score"] = float(candidate.get("score") or 0.0) + 10.0
-            elif candidate.get("content_language") == "chinese" and title_latin_count > title_cjk_count:
-                candidate["score"] = float(candidate.get("score") or 0.0) - 10.0
-
-    candidates.sort(
-        key=lambda candidate: (
-            float(candidate.get("score") or 0.0),
-            len(candidate.get("lyrics") or []),
-            -int(candidate.get("order_index") or 0),
-        ),
-        reverse=True,
-    )
-    return list(candidates[0].get("lyrics") or [])
-
-
-def _fetch_bilibili_lyrics_sync(video_id: str, *, title: str = "", artist: str = "") -> list[LyricLine]:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
-
-    subtitles = _fetch_bilibili_subtitle_catalog_sync(normalized_video_id)
-    lyrics = _resolve_bilibili_lyrics_from_candidates_sync(
-        normalized_video_id,
-        subtitles,
-        title=title,
-        artist=artist,
-    )
-    if lyrics:
-        return lyrics
-
-    admin_cookie = _get_admin_bilibili_cookie_or_none()
-    if admin_cookie:
-        auth_subtitles = _fetch_bilibili_subtitle_catalog_sync(normalized_video_id, cookie=admin_cookie)
-        lyrics = _resolve_bilibili_lyrics_from_candidates_sync(
-            normalized_video_id,
-            auth_subtitles,
-            title=title,
-            artist=artist,
-            cookie=admin_cookie,
-        )
-        if lyrics:
-            return lyrics
-
-        playwright_candidates = asyncio.run(
-            fetch_bilibili_subtitle_candidates_via_playwright(normalized_video_id, admin_cookie)
-        )
-        lyrics = _resolve_bilibili_lyrics_from_candidates_sync(
-            normalized_video_id,
-            playwright_candidates,
-            title=title,
-            artist=artist,
-            cookie=admin_cookie,
-        )
-        if lyrics:
-            return lyrics
-
-    return []
-
-
-async def _fetch_bilibili_lyrics(video_id: str, *, title: str = "", artist: str = "") -> list[LyricLine]:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        return []
-
-    preference = _infer_bilibili_subtitle_preference(title, artist)
-    admin_cookie = _get_admin_bilibili_cookie_or_none()
-    auth_scope = "anon"
-    if admin_cookie:
-        auth_scope = hashlib.sha256(admin_cookie.encode("utf-8")).hexdigest()[:10]
-    cache_key = f"{normalized_video_id}|{preference}|{auth_scope}"
-    cached = _bilibili_subtitle_cache.get(cache_key)
-    now = time.time()
-    if cached is not None and cached[0] > now:
-        return list(cached[1])
-
-    try:
-        lyrics = await asyncio.to_thread(
-            _fetch_bilibili_lyrics_sync,
-            normalized_video_id,
-            title=title,
-            artist=artist,
-        )
-    except HTTPException as exc:
-        logger.warning("failed to resolve bilibili lyrics for %s: %s", normalized_video_id, exc.detail)
-        return []
-    except Exception as exc:
-        logger.warning("failed to resolve bilibili lyrics for %s: %s", normalized_video_id, exc)
-        return []
-
-    _bilibili_subtitle_cache[cache_key] = (time.time() + _BILIBILI_SUBTITLE_CACHE_TTL_S, list(lyrics))
-    return lyrics
-
-
-def _extract_bilibili_playurl_download_target(playurl_data: dict) -> tuple[str, str]:
-    dash = playurl_data.get("dash") or {}
-    if isinstance(dash, dict):
-        audios = dash.get("audio") or []
-        if isinstance(audios, list) and audios:
-            first = audios[0] if isinstance(audios[0], dict) else {}
-            url = str((first or {}).get("baseUrl") or (first or {}).get("base_url") or "").strip()
-            if url:
-                return url, ".m4s"
-            backup_urls = (first or {}).get("backupUrl") or (first or {}).get("backup_url") or []
-            if isinstance(backup_urls, list) and backup_urls:
-                backup = str(backup_urls[0] or "").strip()
-                if backup:
-                    return backup, ".m4s"
-
-    durl = playurl_data.get("durl") or []
-    if isinstance(durl, list) and durl:
-        first = durl[0] if isinstance(durl[0], dict) else {}
-        url = str((first or {}).get("url") or "").strip()
-        if url:
-            return url, ".mp4"
-        backup_urls = (first or {}).get("backup_url") or []
-        if isinstance(backup_urls, list) and backup_urls:
-            backup = str(backup_urls[0] or "").strip()
-            if backup:
-                return backup, ".mp4"
-
-    raise HTTPException(status_code=502, detail="bilibili playurl returned no downloadable media url")
-
-
-async def _bilibili_search_videos(*, keywords: str, limit: int = 20, page: int = 1) -> dict:
-    query = (keywords or "").strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="keywords is empty")
-
-    page = max(1, int(page))
-    limit = max(1, min(int(limit), 50))
-    params = {
-        "Search_key": query,
-        "keyword": query,
-        "page": page,
-        "page_size": limit,
-        "context": "",
-        "duration": 0,
-        "tids_2": "",
-        "__refresh__": "true",
-        "search_type": "video",
-        "tids": 0,
-        "highlight": 1,
-    }
-    cookies = {"buvid3": f"{uuid.uuid4()}infoc"}
-
-    try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            resp = await client.get(
-                "https://api.bilibili.com/x/web-interface/search/type",
-                params=params,
-                headers=_BILIBILI_DEFAULT_HEADERS,
-                cookies=cookies,
-            )
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"bilibili search request failed: {exc}") from exc
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"bilibili search failed: status={resp.status_code}")
-
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail="bilibili search returned invalid json") from exc
-
-    if int(payload.get("code") or 0) != 0:
-        raise HTTPException(status_code=502, detail=f"bilibili search failed: code={payload.get('code')}")
-
-    data = payload.get("data") or {}
-    raw_items = data.get("result") or []
-    items = _normalize_bilibili_search_items(raw_items if isinstance(raw_items, list) else [])
-    items = await _enrich_bilibili_search_items(items)
-    total = _coerce_positive_int(data.get("numResults"))
-    num_pages = _coerce_positive_int(data.get("numPages"))
-    return {
-        "source": "bilibili",
-        "keywords": query,
-        "page": page,
-        "limit": limit,
-        "total": total,
-        "pages": num_pages,
-        "has_more": page < num_pages if num_pages is not None else len(items) == limit,
-        "items": items,
-    }
-
-
-def _get_yt_dlp_module():
-    try:
-        import yt_dlp  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="yt-dlp is not installed on backend") from exc
-    return yt_dlp
-
-
-def _bilibili_cache_protected_paths() -> set[Path]:
-    """Keep the currently playing or downloading Bilibili audio available."""
-    protected: set[Path] = set()
-    cache_root = BILIBILI_AUDIO_DIR.resolve(strict=False)
-
-    current_source = _current_source_url.strip()
-    if current_source:
-        try:
-            current_path = Path(current_source).resolve(strict=False)
-            if current_path.is_relative_to(cache_root):
-                protected.add(current_path)
-        except OSError:
-            pass
-
-    for video_id, lock in list(_bilibili_download_locks.items()):
-        if not lock.locked():
-            continue
-        try:
-            protected.update(
-                path.resolve(strict=False)
-                for path in BILIBILI_AUDIO_DIR.glob(f"{video_id}.*")
-                if path.is_file()
-            )
-        except OSError:
-            continue
-
-    return protected
-
-
-def _cache_status_payload() -> dict:
-    usage = audio_cache_usage(BILIBILI_AUDIO_DIR)
-    return {
-        "total_bytes": usage.total_bytes,
-        "total_files": usage.file_count,
-        "bilibili_audio": {
-            "file_count": usage.file_count,
-            "size_bytes": usage.total_bytes,
-        },
-        "memory_entries": {
-            "bilibili_view_summaries": len(_bilibili_view_summary_cache),
-            "bilibili_subtitles": len(_bilibili_subtitle_cache),
-        },
-    }
-
-
-def _find_cached_bilibili_audio(video_id: str) -> str:
-    if not BILIBILI_AUDIO_DIR.exists():
-        return ""
-
-    requested_paths = set(BILIBILI_AUDIO_DIR.glob(f"{video_id}.*"))
-    prune_result = prune_audio_cache(
-        BILIBILI_AUDIO_DIR,
-        max_bytes=BILIBILI_AUDIO_CACHE_MAX_BYTES,
-        ttl_seconds=BILIBILI_AUDIO_CACHE_TTL_SECONDS,
-        partial_ttl_seconds=BILIBILI_AUDIO_PARTIAL_TTL_SECONDS,
-        protected_paths=requested_paths,
-    )
-    if prune_result.removed_files:
-        logger.info(
-            "pruned %s Bilibili audio cache files (%s bytes)",
-            prune_result.removed_files,
-            prune_result.removed_bytes,
-        )
-
-    candidates: list[Path] = []
-    for path in BILIBILI_AUDIO_DIR.glob(f"{video_id}.*"):
-        if not path.is_file():
-            continue
-        if path.name.endswith(".part"):
-            continue
-        candidates.append(path)
-    extension_priority = {
-        ".m4a": 0,
-        ".m4s": 1,
-        ".aac": 2,
-        ".mp3": 3,
-        ".ogg": 4,
-        ".opus": 5,
-        ".wav": 6,
-        ".flac": 7,
-        ".mp4": 20,
-        ".mkv": 21,
-        ".webm": 22,
-    }
-    candidates.sort(key=lambda path: (extension_priority.get(path.suffix.lower(), 100), path.name))
-    if not candidates:
-        return ""
-    selected = candidates[0]
-    try:
-        selected.touch()
-    except OSError:
-        pass
-    return str(selected.resolve())
-
-
-def _extract_bilibili_video_info_sync(video_id: str) -> dict:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
-
-    api_error: Exception | None = None
-    try:
-        view_data = _fetch_bilibili_view_sync(normalized_video_id)
-        normalized = _normalize_bilibili_view_data(view_data, fallback_video_id=normalized_video_id)
-        if normalized is not None:
-            return normalized
-    except Exception as exc:
-        api_error = exc
-
-    yt_dlp = _get_yt_dlp_module()
-    url = _build_bilibili_video_url(normalized_video_id)
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "http_headers": _BILIBILI_DEFAULT_HEADERS,
-    }
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=False)
-    normalized = _normalize_bilibili_video_info(info, fallback_video_id=normalized_video_id)
-    if normalized is None:
-        if api_error is not None:
-            raise RuntimeError(f"failed to parse bilibili metadata via api ({api_error}) and yt-dlp fallback")
-        raise RuntimeError("failed to parse bilibili metadata")
-    return normalized
-
-
-async def _extract_bilibili_video_info(video_id: str) -> dict:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
-
-    try:
-        normalized = await asyncio.to_thread(_extract_bilibili_video_info_sync, normalized_video_id)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"failed to resolve bilibili video: {exc}") from exc
-
-    if not isinstance(normalized, dict):
-        raise HTTPException(status_code=502, detail="failed to parse bilibili video metadata")
-    return normalized
-
-
-def _download_bilibili_audio_sync(video_id: str) -> tuple[str, dict | None]:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
-
-    BILIBILI_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-
-    api_error: Exception | None = None
-    try:
-        view_data = _fetch_bilibili_view_sync(normalized_video_id)
-        metadata = _normalize_bilibili_view_data(view_data, fallback_video_id=normalized_video_id)
-        cid = _resolve_bilibili_primary_cid(view_data)
-        if cid is None:
-            raise HTTPException(status_code=502, detail="bilibili view api returned no cid")
-
-        playurl_data = _fetch_bilibili_playurl_sync(normalized_video_id, cid, dash=True)
-        download_url, suffix = _extract_bilibili_playurl_download_target(playurl_data)
-        output_path = BILIBILI_AUDIO_DIR / f"{normalized_video_id}{suffix}"
-        tmp_path = output_path.with_name(f"{output_path.name}.part")
-
-        headers = dict(_BILIBILI_DEFAULT_HEADERS)
-        headers["referer"] = _build_bilibili_video_url(normalized_video_id)
-        with httpx.Client(timeout=60.0, follow_redirects=True, headers=headers) as client:
-            with client.stream("GET", download_url) as resp:
-                resp.raise_for_status()
-                with open(tmp_path, "wb") as fh:
-                    for chunk in resp.iter_bytes():
-                        if chunk:
-                            fh.write(chunk)
-        os.replace(tmp_path, output_path)
-        return str(output_path.resolve()), metadata
-    except Exception as exc:
-        api_error = exc
-
-    yt_dlp = _get_yt_dlp_module()
-    outtmpl = str(BILIBILI_AUDIO_DIR / f"{normalized_video_id}.%(ext)s")
-    url = _build_bilibili_video_url(normalized_video_id)
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "format": "bestaudio/best",
-        "outtmpl": outtmpl,
-        "overwrites": False,
-        "continuedl": True,
-        "retries": 2,
-        "fragment_retries": 2,
-        "http_headers": _BILIBILI_DEFAULT_HEADERS,
-    }
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except Exception as exc:
-        if api_error is not None:
-            raise RuntimeError(f"bilibili api download failed ({api_error}); yt-dlp fallback failed ({exc})") from exc
-        raise
-
-    filepath = _find_cached_bilibili_audio(normalized_video_id)
-    normalized = _normalize_bilibili_video_info(info, fallback_video_id=normalized_video_id)
-    return filepath, normalized
-
-
-async def _download_bilibili_audio(video_id: str) -> tuple[str, dict | None]:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
-
-    lock = _get_bilibili_download_lock(normalized_video_id)
-    async with lock:
-        cached_path = _find_cached_bilibili_audio(normalized_video_id)
-        if cached_path:
-            return cached_path, None
-
-        try:
-            filepath, metadata = await asyncio.to_thread(_download_bilibili_audio_sync, normalized_video_id)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"failed to download bilibili audio: {exc}") from exc
-
-        if not filepath:
-            raise HTTPException(status_code=502, detail="failed to locate downloaded bilibili audio")
-        return filepath, metadata
-
-
-async def _resolve_bilibili_playback_payload(
-    *,
-    video_id: str,
-    artist: str = "",
-    album: str = "",
-    artwork_url: str = "",
-    duration_ms: int | None = None,
-) -> tuple[str, int | None, str, str, str]:
-    normalized_video_id = _extract_bilibili_video_id(video_id)
-    if not normalized_video_id:
-        raise HTTPException(status_code=400, detail="invalid bilibili video_id")
-
-    local_path, metadata = await _download_bilibili_audio(normalized_video_id)
-    needs_metadata = not artist or not album or not artwork_url or duration_ms is None
-    if metadata is None and needs_metadata:
-        metadata = await _extract_bilibili_video_info(normalized_video_id)
-
-    resolved_duration_ms = _coerce_positive_int(duration_ms)
-    if resolved_duration_ms is None and metadata is not None:
-        resolved_duration_ms = _coerce_positive_int(metadata.get("duration_ms"))
-
-    resolved_artist = (artist or str((metadata or {}).get("artist") or "")).strip()
-    resolved_album = (album or str((metadata or {}).get("album") or "")).strip()
-    resolved_artwork_url = (artwork_url or str((metadata or {}).get("artwork_url") or "")).strip()
-    return local_path, resolved_duration_ms, resolved_artist, resolved_album, resolved_artwork_url
 
 
 @app.get("/voice/status")
@@ -2873,13 +1562,6 @@ async def lyrics(queue_item_id: int) -> LyricsResponse:
         except Exception:
             return LyricsResponse(lyrics=[])
 
-    elif track_id.startswith("bilibili:"):
-        video_id = _extract_bilibili_video_id(track_id.split(":", 1)[1])
-        if not video_id:
-            return LyricsResponse(lyrics=[])
-        lyrics = await _fetch_bilibili_lyrics(video_id, title=title, artist=artist)
-        return LyricsResponse(lyrics=lyrics)
-    
     else:
         return LyricsResponse(lyrics=[])
 
@@ -2895,16 +1577,6 @@ def _get_admin_qqmusic_cookie(session: Session) -> str:
     if not cookie:
         raise HTTPException(status_code=400, detail="admin qqmusic cookie not set")
     return cookie
-
-
-def _get_admin_bilibili_cookie(session: Session) -> str:
-    row = session.get(Secret, "bilibili_cookie")
-    if not row:
-        raise HTTPException(status_code=400, detail="admin bilibili cookie not set")
-    try:
-        return decrypt_text(row.value)
-    except Exception:
-        raise HTTPException(status_code=500, detail="failed to decrypt admin bilibili cookie")
 
 
 def _require_admin_token(request: Request) -> None:
@@ -3063,117 +1735,6 @@ async def _enqueue_qqmusic_song(
             session.commit()
 
         return int(item.id), False  # QQ Music doesn't have trial mode
-    finally:
-        session.close()
-
-
-async def _enqueue_bilibili_song(
-    *,
-    video_id: str,
-    title: str,
-    artist: str,
-    play_now: bool,
-    requested_by: str,
-    album: str = "",
-    duration_ms: int | None = None,
-    artwork_url: str = "",
-) -> tuple[int, bool]:
-    session = new_session()
-    play_request_generation: int | None = None
-    try:
-        normalized_video_id = _extract_bilibili_video_id(video_id)
-        if not normalized_video_id:
-            raise HTTPException(status_code=400, detail="video_id is empty")
-
-        _ensure_bilibili_duration_allowed(duration_ms, video_id=normalized_video_id, title=title)
-
-        if not play_now:
-            item = QueueItem(
-                track_id=f"bilibili:{normalized_video_id}",
-                title=title,
-                artist=artist,
-                album=album,
-                duration=duration_ms,
-                cover_url=artwork_url,
-                source_url="",
-            )
-            session.add(item)
-            session.commit()
-            _schedule_ts_description_update()
-            return int(item.id), False
-
-        play_request_generation = await _begin_play_request()
-        duration_ms, artist, album, artwork_url = await _hydrate_bilibili_track_metadata(
-            video_id=normalized_video_id,
-            title=title,
-            artist=artist,
-            album=album,
-            artwork_url=artwork_url,
-            duration_ms=duration_ms,
-        )
-
-        if not await _is_play_request_current(play_request_generation):
-            raise HTTPException(status_code=409, detail="bilibili playback request was superseded by a newer command")
-
-        source_url, resolved_duration_ms, resolved_artist, resolved_album, resolved_artwork_url = await _resolve_bilibili_playback_payload(
-            video_id=normalized_video_id,
-            artist=artist,
-            album=album,
-            artwork_url=artwork_url,
-            duration_ms=duration_ms,
-        )
-
-        if not await _is_play_request_current(play_request_generation):
-            raise HTTPException(status_code=409, detail="bilibili playback request was superseded by a newer command")
-
-        final_artist = resolved_artist or artist
-
-        item = QueueItem(
-            track_id=f"bilibili:{normalized_video_id}",
-            title=title,
-            artist=final_artist,
-            album=resolved_album,
-            duration=resolved_duration_ms,
-            cover_url=resolved_artwork_url,
-            source_url=source_url,
-        )
-        session.add(item)
-        session.commit()
-
-        _schedule_ts_description_update()
-
-        await _set_now_playing_queue_item(
-            int(item.id),
-            source_url,
-            duration_ms=resolved_duration_ms,
-            artist=final_artist,
-            album=resolved_album,
-            artwork_url=resolved_artwork_url,
-        )
-
-        if not await _is_play_request_current(play_request_generation):
-            await _take_now_playing_if_match(source_url=source_url)
-            raise HTTPException(status_code=409, detail="bilibili playback request was superseded by a newer command")
-
-        await voice.play(source_url=source_url, title=title, requested_by=requested_by, notice="")
-
-        if not await _is_play_request_current(play_request_generation):
-            raise HTTPException(status_code=409, detail="bilibili playback request was superseded by a newer command")
-
-        hist = HistoryItem(
-            track_id=item.track_id,
-            title=title,
-            artist=final_artist,
-            album=resolved_album,
-            duration=resolved_duration_ms,
-            cover_url=resolved_artwork_url,
-            source_url=source_url,
-            requested_by=requested_by,
-        )
-        session.add(hist)
-        session.commit()
-
-        return int(item.id), False
     finally:
         session.close()
 
@@ -3972,35 +2533,27 @@ def admin_cache_status(request: Request, session: Session = Depends(get_session)
     return _cache_status_payload()
 
 
+def _cache_status_payload() -> dict:
+    """Return the stable cache API shape after removing local media caching."""
+    return {
+        "cache": {"size_bytes": 0, "file_count": 0},
+        "memory_entries": {},
+        "total_size_bytes": 0,
+        "total_file_count": 0,
+    }
+
+
 @app.delete("/admin/cache")
 def admin_clear_cache(request: Request, session: Session = Depends(get_session)) -> dict:
     _, admin_session = require_admin(request, session)
     require_csrf(request, admin_session)
-
-    result = clear_audio_cache(
-        BILIBILI_AUDIO_DIR,
-        protected_paths=_bilibili_cache_protected_paths(),
-    )
-    cleared_memory_entries = len(_bilibili_view_summary_cache) + len(_bilibili_subtitle_cache)
-    _bilibili_view_summary_cache.clear()
-    _bilibili_subtitle_cache.clear()
-
-    if result.removed_files or cleared_memory_entries:
-        logger.info(
-            "cleared Bilibili cache: %s files (%s bytes), retained %s active files, cleared %s memory entries",
-            result.removed_files,
-            result.removed_bytes,
-            result.skipped_files,
-            cleared_memory_entries,
-        )
-
     return {
         "ok": True,
-        "removed_files": result.removed_files,
-        "removed_bytes": result.removed_bytes,
-        "skipped_files": result.skipped_files,
-        "skipped_bytes": result.skipped_bytes,
-        "cleared_memory_entries": cleared_memory_entries,
+        "removed_files": 0,
+        "removed_bytes": 0,
+        "skipped_files": 0,
+        "skipped_bytes": 0,
+        "cleared_memory_entries": 0,
         **_cache_status_payload(),
     }
 
@@ -4011,16 +2564,10 @@ async def admin_update_settings(
     request: Request,
     session: Session = Depends(get_session),
 ) -> dict:
-    global BILIBILI_AUDIO_CACHE_TTL_SECONDS, BILIBILI_AUDIO_CACHE_MAX_BYTES
-    global BILIBILI_AUDIO_PARTIAL_TTL_SECONDS
-
     _, admin_session = require_admin(request, session)
     require_csrf(request, admin_session)
     effects = update_settings(session, req.values, apply=req.apply)
     if req.apply:
-        BILIBILI_AUDIO_CACHE_TTL_SECONDS = max(0, settings.bilibili_audio_cache_ttl_hours) * 3600
-        BILIBILI_AUDIO_CACHE_MAX_BYTES = max(0, settings.bilibili_audio_cache_max_mb) * 1024 * 1024
-        BILIBILI_AUDIO_PARTIAL_TTL_SECONDS = max(0, settings.bilibili_audio_partial_ttl_minutes) * 60
         if "backend.voice_grpc_addr" in req.values:
             await voice.close()
         if "voice" in effects and any(key.startswith("voice.description_") for key in req.values):
@@ -4143,27 +2690,6 @@ async def add_queue_qqmusic(req: AddQQMusicQueueRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/queue/bilibili")
-async def add_queue_bilibili(req: AddBilibiliQueueRequest) -> dict:
-    try:
-        item_id, trial = await _enqueue_bilibili_song(
-            video_id=req.video_id,
-            title=req.title,
-            artist=req.artist,
-            play_now=req.play_now,
-            requested_by="web",
-            album=req.album,
-            duration_ms=req.duration_ms,
-            artwork_url=req.cover_url,
-        )
-        return {"ok": True, "id": item_id, "trial": trial}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to enqueue bilibili video {req.video_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/queue")
 def get_queue(session: Session = Depends(get_session)) -> list[dict]:
     rows = session.execute(select(QueueItem).order_by(QueueItem.id.asc())).scalars().all()
@@ -4242,36 +2768,6 @@ async def _replay_history_item(
     track_id = str(hist_item.track_id or "").strip()
     if not track_id:
         raise HTTPException(status_code=400, detail="history track_id is empty")
-
-    if track_id.startswith("bilibili:"):
-        video_id = _extract_bilibili_video_id(track_id)
-        if not video_id:
-            raise HTTPException(status_code=400, detail="bilibili video_id is empty")
-
-        item_id, trial = await _enqueue_bilibili_song(
-            video_id=video_id,
-            title=hist_item.title,
-            artist=str(hist_item.artist or ""),
-            play_now=play_now,
-            requested_by=requested_by,
-            album=str(hist_item.album or ""),
-            duration_ms=hist_item.duration,
-            artwork_url=str(hist_item.cover_url or ""),
-        )
-        return {
-            "ok": True,
-            "source": "bilibili",
-            "queue_id": item_id,
-            "trial": trial,
-            "play_now": play_now,
-            "message": f"{'Playing' if play_now else 'Added to queue'}: {hist_item.title}",
-            "track": {
-                "source": "bilibili",
-                "track_id": f"bilibili:{video_id}",
-                "video_id": video_id,
-                "webpage_url": _build_bilibili_video_url(video_id),
-            },
-        }
 
     if track_id.startswith("qqmusic:"):
         song_mid = track_id.split(":", 1)[1].strip()
@@ -4392,9 +2888,6 @@ async def external_search(
     page = max(1, int(page))
     limit = max(1, min(int(limit), 50))
 
-    if provider == "bilibili":
-        return await _bilibili_search_videos(keywords=query, limit=limit, page=page)
-
     if provider == "qqmusic":
         songs = await qqmusic.search_songs_simple(query, limit=limit, page=page)
         items = _normalize_qqmusic_search_items(songs)
@@ -4415,69 +2908,6 @@ async def external_add_queue(req: ExternalQueueRequest) -> dict:
     provider = (str(req.source or "").strip().lower() or "qqmusic")
     keywords = (req.keywords or "").strip()
     play_now = bool(req.play_now)
-
-    if provider == "bilibili":
-        video_id = _extract_bilibili_video_id(req.video_id)
-        title = (req.title or "").strip()
-        artist = (req.artist or "").strip()
-        album = (req.album or "").strip()
-        duration_ms = req.duration_ms
-        cover_url = (req.cover_url or "").strip()
-
-        if not video_id:
-            if not keywords:
-                raise HTTPException(status_code=400, detail="video_id or keywords is required for bilibili")
-            result = await _bilibili_search_videos(keywords=keywords, limit=1, page=1)
-            items = result.get("items") or []
-            if not items:
-                raise HTTPException(status_code=404, detail="bilibili video not found")
-            first = items[0]
-            video_id = _extract_bilibili_video_id(first.get("video_id"))
-            title = title or str(first.get("title") or video_id).strip()
-            artist = artist or str(first.get("artist") or "").strip()
-            album = album or str(first.get("album") or "").strip()
-            cover_url = cover_url or str(first.get("artwork_url") or "").strip()
-            duration_ms = duration_ms if duration_ms is not None else _coerce_positive_int(first.get("duration_ms"))
-
-        if video_id and (not title or not artist or not album or not cover_url or duration_ms is None):
-            metadata = await _extract_bilibili_video_info(video_id)
-            title = title or str(metadata.get("title") or video_id).strip()
-            artist = artist or str(metadata.get("artist") or "").strip()
-            album = album or str(metadata.get("album") or "").strip()
-            cover_url = cover_url or str(metadata.get("artwork_url") or "").strip()
-            duration_ms = duration_ms if duration_ms is not None else _coerce_positive_int(metadata.get("duration_ms"))
-
-        if not video_id:
-            raise HTTPException(status_code=400, detail="video_id is empty")
-
-        item_id, trial = await _enqueue_bilibili_song(
-            video_id=video_id,
-            title=title or video_id,
-            artist=artist,
-            play_now=play_now,
-            requested_by="external_api",
-            album=album,
-            duration_ms=duration_ms,
-            artwork_url=cover_url,
-        )
-        return {
-            "ok": True,
-            "source": provider,
-            "queue_id": item_id,
-            "trial": trial,
-            "play_now": play_now,
-            "track": {
-                "source": provider,
-                "track_id": f"bilibili:{video_id}",
-                "video_id": video_id,
-                "title": title or video_id,
-                "artist": artist,
-                "album": album,
-                "duration_ms": duration_ms,
-                "artwork_url": cover_url,
-                "webpage_url": _build_bilibili_video_url(video_id),
-            },
-        }
 
     if provider == "qqmusic":
         song_mid = (req.song_mid or "").strip()
@@ -4586,28 +3016,7 @@ async def external_replay_history(
     return await _replay_history_item(hist_item, play_now=play_now, requested_by="external_history")
 
 
-def _get_admin_bilibili_cookie_or_none() -> str | None:
-    try:
-        session = new_session()
-        try:
-            return _get_admin_bilibili_cookie(session)
-        finally:
-            session.close()
-    except HTTPException:
-        return None
-
-
 # QQ 音乐 API 端点
-
-@app.get("/bilibili/search/videos")
-async def bilibili_search_videos(keywords: str, limit: int = 20, page: int = 1) -> dict:
-    try:
-        return await _bilibili_search_videos(keywords=keywords, limit=limit, page=page)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/qqmusic/search")
 async def qqmusic_search(keywords: str, search_type: int = 0, limit: int = 50, page: int = 1) -> dict:
@@ -4837,111 +3246,6 @@ async def admin_qqmusic_qr_confirm(
     else:
         print(f"[DEBUG] QR confirm - no cookie to save")
     return {"ok": True, "admin_cookie_set": bool(c), "uin": qqmusic.get_uin(), "raw": r}
-
-
-@app.get("/admin/bilibili/status")
-async def admin_bilibili_status(request: Request, session: Session = Depends(get_session)) -> dict:
-    _require_admin_token(request)
-    row = session.get(Secret, "bilibili_cookie")
-    return {
-        "admin_cookie_set": bool(row and row.value),
-        "playwright_available": await is_playwright_runtime_available(),
-        "playwright_dependency_installed": is_playwright_available(),
-    }
-
-
-@app.get("/admin/bilibili/account")
-async def admin_bilibili_account(request: Request, session: Session = Depends(get_session)) -> dict:
-    _require_admin_token(request)
-    cookie = _get_admin_bilibili_cookie(session)
-    data = await asyncio.to_thread(_fetch_bilibili_nav_sync, cookie)
-    return {
-        "mid": data.get("mid"),
-        "uname": data.get("uname") or "",
-        "level_info": data.get("level_info") or {},
-        "is_login": bool(data.get("isLogin")),
-    }
-
-
-@app.post("/admin/bilibili/cookie")
-async def admin_bilibili_set_cookie(
-    req: AdminCookieSetRequest,
-    request: Request,
-    session: Session = Depends(get_session),
-) -> dict:
-    _require_admin_token(request)
-    c = (req.cookie or "").strip()
-    if not c:
-        raise HTTPException(status_code=400, detail="cookie is empty")
-    if c.lower().startswith("cookie:"):
-        c = c.split(":", 1)[1].strip()
-    c = c.replace("\r", "").replace("\n", "")
-    nav = await asyncio.to_thread(_fetch_bilibili_nav_sync, c)
-    if not bool(nav.get("isLogin")):
-        raise HTTPException(status_code=400, detail="bilibili cookie is not logged in")
-    _set_secret(session, "bilibili_cookie", c)
-    return {
-        "ok": True,
-        "admin_cookie_set": True,
-        "mid": nav.get("mid"),
-        "uname": nav.get("uname") or "",
-    }
-
-
-@app.post("/admin/bilibili/qr/start")
-async def admin_bilibili_qr_start(request: Request) -> dict:
-    _require_admin_token(request)
-    try:
-        return await start_bilibili_qr_login_session()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/admin/bilibili/qr/check")
-async def admin_bilibili_qr_check(
-    session_id: str,
-    request: Request,
-    session: Session = Depends(get_session),
-) -> dict:
-    _require_admin_token(request)
-    try:
-        result = await poll_bilibili_qr_login_session(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    if result.get("status") == "authorized":
-        cookie = str(result.get("cookie") or "").strip()
-        if cookie:
-            _set_secret(session, "bilibili_cookie", cookie)
-            try:
-                nav = await asyncio.to_thread(_fetch_bilibili_nav_sync, cookie)
-            except Exception as exc:
-                logger.warning("failed to fetch bilibili account after qr auth: %s", exc)
-                nav = {}
-            return {
-                "status": "authorized",
-                "code": result.get("code"),
-                "message": result.get("message"),
-                "admin_cookie_set": True,
-                "mid": nav.get("mid"),
-                "uname": nav.get("uname") or "",
-            }
-        return {
-            "status": "authorized",
-            "code": result.get("code"),
-            "message": "扫码已确认，但未拿到完整登录 Cookie，请重试一次",
-            "admin_cookie_set": False,
-        }
-
-    return {
-        "status": result.get("status"),
-        "code": result.get("code"),
-        "message": result.get("message"),
-        "admin_cookie_set": False,
-        "raw": result.get("raw"),
-    }
 
 
 @app.post("/qqmusic/login/cookie")

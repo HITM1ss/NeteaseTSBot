@@ -48,16 +48,13 @@ interface ManagedAsset {
 }
 
 interface CacheStatus {
-  total_bytes: number
-  total_files: number
-  bilibili_audio: {
+  cache: {
     file_count: number
     size_bytes: number
   }
-  memory_entries: {
-    bilibili_view_summaries: number
-    bilibili_subtitles: number
-  }
+  memory_entries: Record<string, number>
+  total_size_bytes: number
+  total_file_count: number
 }
 
 interface CacheClearResult extends CacheStatus {
@@ -72,20 +69,12 @@ interface CacheClearResult extends CacheStatus {
 const GROUPS = [
   ['web', 'Web 配置'],
   ['backend', 'Voice 服务'],
-  ['music', '音乐接口配置'],
   ['cache', '缓存'],
   ['authorization', '音乐会员登录'],
   ['teamspeak', 'TeamSpeak 配置'],
   ['serverquery', 'ServerQuery 兼容'],
   ['access', '外部 api'],
 ] as const
-
-const MUSIC_SETTING_KEYS = new Set([
-  'backend.bilibili_max_duration_minutes',
-  'backend.bilibili_audio_cache_ttl_hours',
-  'backend.bilibili_audio_cache_max_mb',
-  'backend.bilibili_audio_partial_ttl_minutes',
-])
 
 const GROUP_ALIASES: Record<string, string> = {
   description: 'teamspeak',
@@ -114,18 +103,14 @@ const toastType = ref<'success' | 'error' | 'info'>('info')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 let waitGeneration = 0
 
-const activeFields = computed(() => payload.value?.fields.filter((field) => (
-  field.group === activeGroup.value
-  && (field.group !== 'music' || MUSIC_SETTING_KEYS.has(field.key))
-)) || [])
+const activeFields = computed(() => payload.value?.fields.filter((field) => field.group === activeGroup.value) || [])
 const activeAssets = computed(() => payload.value?.assets.filter((asset) => asset.group === activeGroup.value) || [])
 const activeNeedsVoiceRestart = computed(() => (
   activeFields.value.some((field) => field.restart === 'voice')
   || activeAssets.value.some((asset) => asset.restart === 'voice')
 ))
 const memoryCacheEntryCount = computed(() => {
-  const entries = cacheStatus.value?.memory_entries
-  return Number(entries?.bilibili_view_summaries || 0) + Number(entries?.bilibili_subtitles || 0)
+  return Object.values(cacheStatus.value?.memory_entries || {}).reduce((total, value) => total + Number(value || 0), 0)
 })
 
 function hydrate(result: SettingsPayload) {
@@ -309,9 +294,9 @@ async function loadCacheStatus() {
 }
 
 async function clearCache() {
-  const usedSpace = formatBytes(cacheStatus.value?.total_bytes || 0)
+  const usedSpace = formatBytes(cacheStatus.value?.total_size_bytes || 0)
   const confirmed = window.confirm(
-    `确定清理缓存吗？\n\n将删除约 ${usedSpace} 的 B 站音频缓存和临时内存数据。正在播放或下载的音频会保留。`,
+    `确定清理缓存吗？\n\n将删除约 ${usedSpace} 的本地缓存；不会删除数据库、播放队列、历史记录、登录凭据、上传图片或日志。`,
   )
   if (!confirmed) return
 
@@ -412,9 +397,9 @@ onBeforeUnmount(() => {
                     <div>
                       <p class="text-sm text-gray-500">当前可清理缓存占用</p>
                       <p class="text-3xl font-semibold text-gray-900 mt-1">
-                        {{ cacheLoading && !cacheStatus ? '--' : formatBytes(cacheStatus?.total_bytes) }}
+                        {{ cacheLoading && !cacheStatus ? '--' : formatBytes(cacheStatus?.total_size_bytes) }}
                       </p>
-                      <p class="text-xs text-gray-500 mt-1">{{ cacheStatus?.total_files ?? 0 }} 个 B 站音频缓存文件</p>
+                      <p class="text-xs text-gray-500 mt-1">{{ cacheStatus?.total_file_count ?? 0 }} 个缓存文件</p>
                     </div>
                   </div>
                   <button type="button" class="btn-secondary" :disabled="cacheLoading || cacheClearing" @click="loadCacheStatus">
@@ -429,10 +414,10 @@ onBeforeUnmount(() => {
 
                 <dl class="mt-6 divide-y divide-gray-100 border-y border-gray-100">
                   <div class="flex items-center justify-between gap-4 py-3 text-sm">
-                    <dt class="text-gray-600">B 站音频缓存</dt>
+                    <dt class="text-gray-600">本地媒体缓存</dt>
                     <dd class="text-right text-gray-900 font-medium">
-                      {{ formatBytes(cacheStatus?.bilibili_audio?.size_bytes) }}
-                      <span class="text-gray-500 font-normal">· {{ cacheStatus?.bilibili_audio?.file_count ?? 0 }} 个文件</span>
+                      {{ formatBytes(cacheStatus?.cache?.size_bytes) }}
+                      <span class="text-gray-500 font-normal">· {{ cacheStatus?.cache?.file_count ?? 0 }} 个文件</span>
                     </dd>
                   </div>
                   <div class="flex items-center justify-between gap-4 py-3 text-sm">
@@ -443,7 +428,7 @@ onBeforeUnmount(() => {
 
                 <div class="mt-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <p class="text-xs leading-5 text-gray-500 max-w-xl">
-                    仅清理 B 站下载音频和临时内存数据；不会删除数据库、播放队列、历史记录、登录凭据、上传图片或日志。正在播放或下载的音频会保留。
+                    当前版本未使用本地媒体缓存。清理操作不会删除数据库、播放队列、历史记录、登录凭据、上传图片或日志。
                   </p>
                   <button type="button" class="btn-secondary text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700 shrink-0" :disabled="cacheLoading || cacheClearing" @click="clearCache">
                     <Trash2 :size="17" />

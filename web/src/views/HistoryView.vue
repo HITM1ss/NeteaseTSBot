@@ -10,7 +10,6 @@ import {
   Music,
   Calendar,
   Heart,
-  ExternalLink,
 } from 'lucide-vue-next'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
 import { useTransientMessage } from '../composables/useTransientMessage'
@@ -82,26 +81,13 @@ function getRelativeTime(dateString: string): string {
   return formatDateTime(dateString)
 }
 
-function isBilibiliTrack(track: any): boolean {
-  return String(track?.track_id || '').startsWith('bilibili:')
-}
-
 function isSupportedTrack(track: any): boolean {
-  return track?.source === 'qqmusic' || track?.source === 'bilibili'
+  return track?.source === 'qqmusic'
 }
 
 function getTrackArtwork(track: any): string {
   const raw = String(track?.artwork || '').trim()
   return raw || ''
-}
-
-function getTrackWebpageUrl(track: any): string {
-  const trackId = String(track?.track_id || '').trim()
-  const match = trackId.match(/bilibili:(BV[0-9A-Za-z]+|av\d+)/i)
-  if (!match) return ''
-  const token = match[1]
-  const videoId = token.toLowerCase().startsWith('bv') ? `BV${token.slice(2)}` : token.toLowerCase()
-  return `https://www.bilibili.com/video/${videoId}`
 }
 
 function isLocalFav(track: any): boolean {
@@ -239,16 +225,6 @@ onMounted(() => {
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right">
                   <div class="flex items-center justify-end gap-2 md:opacity-0 group-hover:opacity-100 transition-all duration-200 md:transform md:translate-x-2 group-hover:translate-x-0">
-                    <a
-                      v-if="isBilibiliTrack(track) && getTrackWebpageUrl(track)"
-                      :href="getTrackWebpageUrl(track)"
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      class="p-2 text-gray-400 hover:text-pink-600 hover:bg-pink-50 rounded-lg transition-colors"
-                      title="查看原视频"
-                    >
-                      <ExternalLink :size="18" />
-                    </a>
                     <button
                       @click="addToQueue(track)"
                       class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"

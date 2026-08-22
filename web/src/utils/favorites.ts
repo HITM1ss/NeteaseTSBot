@@ -1,4 +1,4 @@
-export type MusicSource = 'qqmusic' | 'bilibili'
+export type MusicSource = 'qqmusic'
 
 type Artist = { name: string }
 
@@ -7,14 +7,11 @@ export type FavoriteSong = {
   name: string
   source: MusicSource
   track_id: string
-  video_id?: string
   song_mid?: string
   album_mid?: string
   artist?: string
   album?: string
   artwork_url?: string
-  webpage_url?: string
-  description?: string
   artists?: Artist[]
   duration_ms?: number
   _fav_at?: number
@@ -32,7 +29,6 @@ export type FavoritePlaylist = {
 
 const SONGS_KEY = 'tsbot:fav:songs'
 const PLAYLISTS_KEY = 'tsbot:fav:playlists'
-const BILIBILI_VIDEO_ID_RE = /(BV[0-9A-Za-z]+|av\d+)/i
 
 function safeParseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback
@@ -41,14 +37,6 @@ function safeParseJson<T>(raw: string | null, fallback: T): T {
   } catch {
     return fallback
   }
-}
-
-function normalizeBilibiliVideoId(value: unknown): string {
-  const raw = String(value ?? '').trim()
-  const match = raw.match(BILIBILI_VIDEO_ID_RE)
-  if (!match) return ''
-  const token = match[1]
-  return token.toLowerCase().startsWith('bv') ? `BV${token.slice(2)}` : token.toLowerCase()
 }
 
 function normalizeProtocolUrl(value: unknown): string {
@@ -85,7 +73,7 @@ function hashToPositiveInt(value: string): number {
 }
 
 function isMusicSource(value: unknown): value is MusicSource {
-  return value === 'qqmusic' || value === 'bilibili'
+  return value === 'qqmusic'
 }
 
 function inferSongSource(input: any): MusicSource | null {
@@ -94,23 +82,11 @@ function inferSongSource(input: any): MusicSource | null {
 
   const trackId = String(input?.track_id ?? '').trim().toLowerCase()
   if (trackId.startsWith('qqmusic:')) return 'qqmusic'
-  if (trackId.startsWith('bilibili:')) return 'bilibili'
-
-  if (normalizeBilibiliVideoId(input?.video_id || input?.bvid || input?.webpage_url || input?.arcurl || input?.track_id)) {
-    return 'bilibili'
-  }
   if (String(input?.song_mid || input?.songmid || input?.mid || '').trim()) return 'qqmusic'
   return null
 }
 
 function getSongKey(input: any, source: MusicSource): string {
-  if (source === 'bilibili') {
-    const videoId = normalizeBilibiliVideoId(
-      input?.video_id || input?.bvid || input?.track_id || input?.webpage_url || input?.arcurl,
-    )
-    return videoId ? `bilibili:${videoId}` : ''
-  }
-
   const songMid = String(input?.song_mid || input?.songmid || input?.mid || '').trim()
   if (songMid) return `qqmusic:${songMid}`
   const trackId = String(input?.track_id || '').trim()
@@ -118,10 +94,6 @@ function getSongKey(input: any, source: MusicSource): string {
 }
 
 function getArtist(input: any, source: MusicSource): string {
-  if (source === 'bilibili') {
-    return String(input?.artist || input?.author || input?.owner?.name || '').trim()
-  }
-
   const artist = input?.artist
   if (typeof artist === 'string' && artist.trim()) return artist.trim()
   const candidates = input?.singer || input?.artists
@@ -130,25 +102,15 @@ function getArtist(input: any, source: MusicSource): string {
 }
 
 function getAlbum(input: any, source: MusicSource): string {
-  if (source === 'bilibili') return String(input?.album || input?.typename || '').trim()
   return String(input?.album?.name || input?.album?.title || input?.albumname || input?.album || '').trim()
 }
 
 function getArtwork(input: any, source: MusicSource): string {
   const explicit = normalizeProtocolUrl(input?.artwork_url || input?.artwork || input?.cover_url)
   if (explicit) return explicit
-  if (source === 'bilibili') return normalizeProtocolUrl(input?.pic || input?.thumbnail)
 
   const albumMid = String(input?.album?.pmid || input?.album?.mid || input?.albummid || input?.album_mid || '').trim()
   return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ''
-}
-
-function getWebpageUrl(input: any, source: MusicSource): string {
-  if (source !== 'bilibili') return ''
-  const explicit = normalizeProtocolUrl(input?.webpage_url || input?.arcurl || input?.url)
-  if (explicit) return explicit
-  const videoId = normalizeBilibiliVideoId(input?.video_id || input?.bvid || input?.track_id)
-  return videoId ? `https://www.bilibili.com/video/${videoId}` : ''
 }
 
 function normalizeSong(input: any): FavoriteSong | null {
@@ -162,7 +124,6 @@ function normalizeSong(input: any): FavoriteSong | null {
   const artist = getArtist(input, source)
   const album = getAlbum(input, source)
   const artworkUrl = getArtwork(input, source)
-  const videoId = normalizeBilibiliVideoId(input?.video_id || input?.bvid || input?.track_id || input?.webpage_url || input?.arcurl)
   const songMid = String(input?.song_mid || input?.songmid || input?.mid || '').trim()
   const albumMid = String(input?.album_mid || input?.album?.mid || input?.albummid || '').trim()
 
@@ -171,14 +132,11 @@ function normalizeSong(input: any): FavoriteSong | null {
     name,
     source,
     track_id: trackId,
-    video_id: videoId || undefined,
     song_mid: songMid || undefined,
     album_mid: albumMid || undefined,
     artist: artist || undefined,
     album: album || undefined,
     artwork_url: artworkUrl || undefined,
-    webpage_url: getWebpageUrl(input, source) || undefined,
-    description: String(input?.description || input?.desc || '').trim() || undefined,
     artists: artist ? [{ name: artist }] : undefined,
     duration_ms: parseDurationMs(input?.duration_ms ?? input?.duration ?? input?.interval),
   }

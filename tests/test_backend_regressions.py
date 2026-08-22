@@ -1,8 +1,4 @@
-import os
-import tempfile
-import time
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -11,128 +7,27 @@ from fastapi import HTTPException
 from backend import main
 
 
-class BilibiliAudioCacheTests(unittest.TestCase):
-    def test_cache_lookup_removes_expired_audio_and_stale_partial_files(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            audio_path = cache_dir / "BVEXPIRED.m4a"
-            partial_path = cache_dir / "BVFAILED.m4s.part"
-            audio_path.write_bytes(b"audio")
-            partial_path.write_bytes(b"partial")
-
-            old_timestamp = time.time() - 7200
-            os.utime(audio_path, (old_timestamp, old_timestamp))
-            os.utime(partial_path, (old_timestamp, old_timestamp))
-
-            with (
-                patch.object(main, "BILIBILI_AUDIO_DIR", cache_dir),
-                patch.object(main, "BILIBILI_AUDIO_CACHE_TTL_SECONDS", 3600, create=True),
-                patch.object(main, "BILIBILI_AUDIO_CACHE_MAX_BYTES", 0, create=True),
-                patch.object(main, "BILIBILI_AUDIO_PARTIAL_TTL_SECONDS", 3600, create=True),
-            ):
-                cached = main._find_cached_bilibili_audio("BVEXPIRED")
-
-            self.assertEqual("", cached)
-            self.assertFalse(audio_path.exists())
-            self.assertFalse(partial_path.exists())
-
-    def test_cache_lookup_evicts_oldest_audio_when_size_limit_is_exceeded(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            oldest_path = cache_dir / "BVOLDEST.m4a"
-            newest_path = cache_dir / "BVNEWEST.m4a"
-            oldest_path.write_bytes(b"a" * 700_000)
-            newest_path.write_bytes(b"b" * 700_000)
-
-            now = time.time()
-            os.utime(oldest_path, (now - 120, now - 120))
-            os.utime(newest_path, (now - 60, now - 60))
-
-            with (
-                patch.object(main, "BILIBILI_AUDIO_DIR", cache_dir),
-                patch.object(main, "BILIBILI_AUDIO_CACHE_TTL_SECONDS", 0, create=True),
-                patch.object(main, "BILIBILI_AUDIO_CACHE_MAX_BYTES", 1_000_000, create=True),
-            ):
-                main._find_cached_bilibili_audio("BVMISSING")
-
-            self.assertFalse(oldest_path.exists())
-            self.assertTrue(newest_path.exists())
-
-    def test_cache_lookup_does_not_evict_the_requested_audio(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            requested_path = cache_dir / "BVREQUESTED.m4a"
-            other_path = cache_dir / "BVOTHER.m4a"
-            requested_path.write_bytes(b"a" * 700_000)
-            other_path.write_bytes(b"b" * 700_000)
-
-            now = time.time()
-            os.utime(requested_path, (now - 120, now - 120))
-            os.utime(other_path, (now - 60, now - 60))
-
-            with (
-                patch.object(main, "BILIBILI_AUDIO_DIR", cache_dir),
-                patch.object(main, "BILIBILI_AUDIO_CACHE_TTL_SECONDS", 0),
-                patch.object(main, "BILIBILI_AUDIO_CACHE_MAX_BYTES", 1_000_000),
-            ):
-                cached = main._find_cached_bilibili_audio("BVREQUESTED")
-
-            self.assertEqual(str(requested_path.resolve()), cached)
-            self.assertTrue(requested_path.exists())
-            self.assertFalse(other_path.exists())
-
-
 class AdminCacheTests(unittest.TestCase):
-    def test_cache_status_reports_bilibili_audio_disk_usage(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            (cache_dir / "BVONE.m4a").write_bytes(b"1234")
-            (cache_dir / "BVTWO.m4s.part").write_bytes(b"567")
+    def test_cache_status_uses_the_generic_empty_cache_shape(self) -> None:
+        with patch.object(main, "require_admin"):
+            result = main.admin_cache_status(object(), object())
 
-            with (
-                patch.object(main, "BILIBILI_AUDIO_DIR", cache_dir),
-                patch.object(main, "require_admin"),
-                patch.dict(main._bilibili_view_summary_cache, {}, clear=True),
-                patch.dict(main._bilibili_subtitle_cache, {}, clear=True),
-            ):
-                result = main.admin_cache_status(object(), object())
+        self.assertEqual(0, result["total_size_bytes"])
+        self.assertEqual(0, result["total_file_count"])
+        self.assertEqual({"size_bytes": 0, "file_count": 0}, result["cache"])
+        self.assertEqual({}, result["memory_entries"])
 
-        self.assertEqual(2, result["total_files"])
-        self.assertEqual(7, result["total_bytes"])
-        self.assertEqual(2, result["bilibili_audio"]["file_count"])
-        self.assertEqual(7, result["bilibili_audio"]["size_bytes"])
-        self.assertEqual(0, result["memory_entries"]["bilibili_view_summaries"])
-        self.assertEqual(0, result["memory_entries"]["bilibili_subtitles"])
+    def test_clear_cache_is_a_safe_no_op_without_media_caching(self) -> None:
+        with (
+            patch.object(main, "require_admin", return_value=(object(), object())),
+            patch.object(main, "require_csrf"),
+        ):
+            result = main.admin_clear_cache(object(), object())
 
-    def test_clear_cache_preserves_currently_playing_audio(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            active_path = cache_dir / "BVACTIVE.m4a"
-            cached_path = cache_dir / "BVCACHED.m4a"
-            active_path.write_bytes(b"active")
-            cached_path.write_bytes(b"cached")
-
-            with (
-                patch.object(main, "BILIBILI_AUDIO_DIR", cache_dir),
-                patch.object(main, "_current_source_url", str(active_path)),
-                patch.object(main, "require_admin", return_value=(object(), object())),
-                patch.object(main, "require_csrf"),
-                patch.dict(main._bilibili_view_summary_cache, {"BV1": (0.0, {})}, clear=True),
-                patch.dict(main._bilibili_subtitle_cache, {"BV2": (0.0, [])}, clear=True),
-            ):
-                result = main.admin_clear_cache(object(), object())
-
-                self.assertTrue(active_path.exists())
-                self.assertFalse(cached_path.exists())
-                self.assertEqual(1, result["removed_files"])
-                self.assertEqual(len(b"cached"), result["removed_bytes"])
-                self.assertEqual(1, result["skipped_files"])
-                self.assertEqual(len(b"active"), result["skipped_bytes"])
-                self.assertEqual(2, result["cleared_memory_entries"])
-                self.assertEqual(1, result["total_files"])
-                self.assertEqual(len(b"active"), result["total_bytes"])
-                self.assertEqual(0, result["memory_entries"]["bilibili_view_summaries"])
-                self.assertEqual(0, result["memory_entries"]["bilibili_subtitles"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(0, result["removed_files"])
+        self.assertEqual(0, result["removed_bytes"])
+        self.assertEqual(0, result["total_size_bytes"])
 
 
 class QQMusicNormalizationTests(unittest.TestCase):

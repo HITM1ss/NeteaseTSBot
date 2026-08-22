@@ -32,11 +32,7 @@ class Settings(BaseSettings):
     web_app_icon: str = ""
     web_log_level: str = "INFO"
     voice_description_title: str = "Yumi TSBot"
-    voice_description_intro: str = "TeamSpeak 音乐机器人\\n支持 QQ 音乐 / B站"
-    bilibili_max_duration_minutes: int = 180
-    bilibili_audio_cache_ttl_hours: int = 72
-    bilibili_audio_cache_max_mb: int = 2048
-    bilibili_audio_partial_ttl_minutes: int = 60
+    voice_description_intro: str = "TeamSpeak 音乐机器人\\n支持 QQ 音乐"
 
     def get_api_tokens(self) -> list[str]:
         tokens: list[str] = []

@@ -8,7 +8,6 @@ import {
   Trash2,
   Play,
   Plus,
-  ExternalLink,
 } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import FloatingErrorToast from '../components/FloatingErrorToast.vue'
@@ -54,10 +53,6 @@ function formatDuration(durationMs?: number): string {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
 }
 
-function isBilibiliSong(song: FavoriteSong): boolean {
-  return song.source === 'bilibili' || String(song.track_id || '').startsWith('bilibili:') || !!song.video_id
-}
-
 function isQQMusicSong(song: FavoriteSong): boolean {
   return song.source === 'qqmusic' || String(song.track_id || '').startsWith('qqmusic:') || !!song.song_mid
 }
@@ -75,43 +70,12 @@ function getSongArtwork(song: FavoriteSong): string {
   return song.artwork_url || ''
 }
 
-function getSongWebpageUrl(song: FavoriteSong): string {
-  return song.webpage_url || ''
-}
-
 function getSongSourceLabel(song: FavoriteSong): string {
-  if (isBilibiliSong(song)) return 'B站'
   return 'QQ音乐'
-}
-
-function getBilibiliVideoId(song: FavoriteSong): string {
-  const raw = String(song.video_id || song.track_id || song.webpage_url || '').trim()
-  const match = raw.match(/(BV[0-9A-Za-z]+|av\d+)/i)
-  if (!match) return ''
-  const token = match[1]
-  return token.toLowerCase().startsWith('bv') ? `BV${token.slice(2)}` : token.toLowerCase()
 }
 
 async function playSong(song: FavoriteSong) {
   try {
-    if (isBilibiliSong(song)) {
-      const videoId = getBilibiliVideoId(song)
-      if (!videoId) {
-        throw new Error('未找到 B 站视频 ID')
-      }
-
-      await apiPost('/queue/bilibili', {
-        video_id: videoId,
-        title: song.name,
-        artist: getSongArtists(song),
-        album: getSongAlbum(song),
-        play_now: true,
-        cover_url: getSongArtwork(song),
-        duration_ms: song.duration_ms,
-      })
-      return
-    }
-
     if (isQQMusicSong(song)) {
       await apiPost('/queue/qqmusic', {
         song_mid: String(song.song_mid || String(song.track_id || '').split(':', 2)[1] || ''),
@@ -133,24 +97,6 @@ async function playSong(song: FavoriteSong) {
 
 async function addToQueue(song: FavoriteSong) {
   try {
-    if (isBilibiliSong(song)) {
-      const videoId = getBilibiliVideoId(song)
-      if (!videoId) {
-        throw new Error('未找到 B 站视频 ID')
-      }
-
-      await apiPost('/queue/bilibili', {
-        video_id: videoId,
-        title: song.name,
-        artist: getSongArtists(song),
-        album: getSongAlbum(song),
-        play_now: false,
-        cover_url: getSongArtwork(song),
-        duration_ms: song.duration_ms,
-      })
-      return
-    }
-
     if (isQQMusicSong(song)) {
       await apiPost('/queue/qqmusic', {
         song_mid: String(song.song_mid || String(song.track_id || '').split(':', 2)[1] || ''),
@@ -278,9 +224,6 @@ onMounted(refresh)
                         <span class="rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-500">
                           {{ getSongSourceLabel(song) }}
                         </span>
-                        <span v-if="isBilibiliSong(song) && getSongWebpageUrl(song)" class="truncate">
-                          可跳转原视频
-                        </span>
                       </div>
                     </div>
                   </div>
@@ -296,17 +239,6 @@ onMounted(refresh)
                 </td>
                 <td class="px-3 md:px-6 py-3 md:py-4 text-right">
                   <div class="flex items-center justify-end gap-2 md:opacity-0 group-hover:opacity-100 transition-all duration-200">
-                    <a
-                      v-if="isBilibiliSong(song) && getSongWebpageUrl(song)"
-                      :href="getSongWebpageUrl(song)"
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      class="p-2 text-gray-400 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-colors"
-                      title="打开原视频"
-                    >
-                      <ExternalLink :size="18" />
-                    </a>
-
                     <button
                       class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                       title="添加到队列"

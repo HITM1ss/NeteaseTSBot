@@ -2,32 +2,35 @@
 
 ## 项目结构与模块组织
 
-- `backend/`：Python/FastAPI API、数据模型、音乐源适配器和语音服务客户端。
-- `web/`：Vue 3 + TypeScript + Vite 控制台（包括 `web/src/components/`、`web/src/views/` 和工具模块）。
-- `voice-service/`：Rust TeamSpeak 音频客户端与 gRPC 服务；`proto/` 存放服务定义。
-- `tests/`：后端回归测试和管理员配置测试；`vendor/`：固定版本的本地 Rust crate。
-- 根目录中的 `Makefile`、`Dockerfile*`、`docker-compose*.yml`、`run-*.sh` 和 `scripts/` 提供部署辅助功能；运行时数据和日志已被忽略。
+- `backend/`：Python/FastAPI API、SQLite 数据模型、QQ 音乐适配器（`qqmusic.py`）和 Voice gRPC 客户端。
+- `web/`：Vue 3 + TypeScript + Vite 控制台；页面在 `web/src/views/`，可复用组件在 `web/src/components/`。
+- `voice-service/`：Rust TeamSpeak 音频客户端和 gRPC 服务；协议定义在 `proto/`。
+- `tests/`：后端回归、鉴权和 QQ 音乐行为测试；`vendor/` 为固定的本地 Rust crate。
+
+当前音乐源仅为 QQ 音乐。新增点歌、搜索或歌单逻辑应复用 `backend/qqmusic.py`，并使用 `qqmusic:<song_mid>` 作为曲目 ID；不要重新引入已退役音乐源的依赖、路由或界面。
 
 ## 构建、测试与开发命令
 
 - `make backend-setup`：创建 `backend/.venv` 并安装 Python 依赖。
-- `npm --prefix web ci && npm --prefix web run build`：安装前端依赖并构建生产包。
-- `cargo build --manifest-path voice-service/Cargo.toml`：构建 Rust 服务；`make all` 执行完整的安装与构建流程。
-- `backend/.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`：运行后端测试套件。
-- 本地开发按需运行 `backend/.venv/bin/uvicorn backend.main:app --reload`、`npm --prefix web run dev` 和 `./run-voicemake.sh`。`docker compose up -d --build` 可验证打包后的服务栈。
+- `npm --prefix web ci && npm --prefix web run build`：安装并构建前端生产包。
+- `cargo build --manifest-path voice-service/Cargo.toml`：构建语音服务；`make all` 执行完整构建。
+- `backend/.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`：运行后端测试。
+- 开发时按需运行 `backend/.venv/bin/uvicorn backend.main:app --reload`、`npm --prefix web run dev` 和 `./run-voicemake.sh`。使用 `docker compose up -d --build` 验证容器栈。
 
-## 编码风格与命名约定
+## 编码与测试约定
 
-Python 使用 4 个空格和类型标注；函数、模块采用 `snake_case`，类采用 `PascalCase`。测试类以 `Tests` 结尾，测试方法以 `test_` 开头。TypeScript/Vue 遵循现有的 2 空格缩进，值和函数使用 `camelCase`，组件文件使用 `PascalCase.vue`。Rust 提交前运行 `cargo fmt`；不要手动编辑 `backend/_generated/` 等生成文件。
+Python 使用 4 空格、类型标注、`snake_case` 函数和 `PascalCase` 类。Vue/TypeScript 使用现有 2 空格风格、`camelCase` 值和 `PascalCase.vue` 组件。Rust 提交前执行 `cargo fmt`；不要手动编辑 `backend/_generated/` 等生成文件。
 
-## 测试指南
+在 `tests/` 添加 `test_*.py` 回归测试；测试类以 `Tests` 结尾，测试方法以 `test_` 开头。使用 mock、临时 SQLite 数据库和临时文件，避免依赖真实 QQ 音乐 API 或 TeamSpeak。修改点歌、队列或历史重播时，应覆盖 Cookie 缺失、歌曲不可播放和自动跳过等回归场景。前端或语音服务变更至少分别通过前端构建和 Rust 构建。
 
-使用 `unittest` 在 `tests/` 下添加针对性回归测试；使用 mock、临时 SQLite 数据库和临时文件，避免依赖真实音乐 API 或 TeamSpeak。提交前运行完整测试发现命令。前端和语音服务改动至少应通过 `npm --prefix web run build` 与 `cargo build --manifest-path voice-service/Cargo.toml`；仓库未设置覆盖率门槛。
+## 运行时配置
 
-## 提交与拉取请求指南
+从 `tsbot.env.example` 复制出 `tsbot.env`，并在部署前设置高强度 `TSBOT_COOKIE_KEY`。TeamSpeak 连接、QQ 音乐登录态、外部 API Token 和界面资源由管理员设置页管理。升级代码时保留旧数据库的兼容路径；若改动队列序列化、播放地址或配置键，必须说明迁移行为，并确保旧队列不会阻塞后续 QQ 音乐播放。
 
-遵循现有的 Conventional Commit 格式，例如 `feat(admin): add ...`、`fix(auth): ...` 或 `docs(config): ...`；主题应简短、使用祈使语气并注明作用域。PR 应说明影响、列出涉及模块、附上测试/构建结果，并注明配置或迁移变更。界面改动请附截图、关联 Issue，并脱敏 Cookie、Token、凭据和敏感日志。
+## 变更检查
 
-## 安全与配置提示
+提交前确认 API 路由、前端调用和文档中的来源名称保持一致。修改 `/external/*` 接口时，兼顾 Bearer Token 与 `x-api-token` 两种认证方式。涉及 Dockerfile 或依赖清单时，避免添加未使用的大型运行时依赖；镜像变更应至少通过一次本地构建或 CI 构建验证。合并前运行 `git diff --check`，并在 PR 中记录实际执行过的构建与测试命令；同步检查 `README.md`、`README.en.md`、`web/README.md` 和 `AGENTS.md`。
 
-将 `tsbot.env.example` 复制为 `tsbot.env`；不要提交该文件、Cookie、Token、数据库或日志。管理员凭据和生成的运行时文件都应视为机密，附在 Issue 或 PR 中的诊断输出必须先脱敏。
+## 提交、安全与 PR
+
+使用 Conventional Commit，例如 `feat(player): ...`、`fix(qqmusic): ...`。PR 应说明影响、测试结果、配置迁移和界面截图。不要提交 `tsbot.env`、Cookie、Token、数据库、日志或任何脱敏前的诊断输出；Issue 和 PR 中的播放链接、Cookie 片段、用户信息和日志也必须先脱敏。

@@ -238,10 +238,8 @@ import { useTransientMessage } from '../composables/useTransientMessage'
 interface Track {
   id: number
   track_id?: string
-  source?: 'qqmusic' | 'bilibili'
+  source?: 'qqmusic'
   song_mid?: string
-  video_id?: string
-  webpage_url?: string
   title: string
   artist: string
   album?: string
@@ -295,7 +293,7 @@ function markQueueFavorites(list: Track[]): Track[] {
 }
 
 function isSupportedTrack(track: Track): boolean {
-  return track.source === 'qqmusic' || track.source === 'bilibili'
+  return track.source === 'qqmusic'
 }
 
 function applyQueueUpdate(next: Track[]) {
@@ -398,8 +396,6 @@ async function toggleLike(track: Track) {
     source: track.source,
     track_id: track.track_id,
     song_mid: track.song_mid,
-    video_id: track.video_id,
-    webpage_url: track.webpage_url,
     name: track.title,
     artist: track.artist,
     album: track.album,

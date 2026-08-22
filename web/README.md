@@ -8,12 +8,12 @@ A modern Vue.js frontend for the TSBot music player with comprehensive music man
 - 🎤 **Lyrics Display**: Real-time synchronized lyrics display
 - 📱 **Responsive Design**: Mobile-first design that works on all devices
 - 🎨 **Beautiful UI**: Modern interface built with TailwindCSS and Lucide icons
-- 🔍 **Music Search**: Search and discover QQ Music songs and Bilibili videos
+- 🔍 **Music Search**: Search and discover QQ Music songs
 - 📋 **Playlist Management**: Drag-and-drop playlist organization
 - ❤️ **Favorites**: Manage your liked songs
 - 📚 **Music Library**: Browse your playlists and music collection
 - 📈 **Play History**: Track your listening history
-- ⚙️ **Settings**: Configure QQ Music and Bilibili authorization
+- ⚙️ **Settings**: Configure QQ Music authorization
 
 ## Technology Stack
 
@@ -120,9 +120,7 @@ The frontend communicates with the TSBot backend through REST APIs:
 
 - `GET /queue` - Get current playback queue
 - `POST /queue/qqmusic` - Add a QQ Music song to the queue
-- `POST /queue/bilibili` - Add a Bilibili video to the queue
 - `GET /qqmusic/search/songs` - Search QQ Music
-- `GET /bilibili/search/videos` - Search Bilibili videos
 - `GET /voice/status` - Get player status
 - `POST /voice/play` - Control playback
 - `GET /lyrics/{queueItemId}` - Get lyrics for the queued media
@@ -133,7 +131,7 @@ The frontend communicates with the TSBot backend through REST APIs:
 To authorize protected music sources:
 
 1. Go to the Settings page (`/settings?group=authorization`)
-2. Scan the QR code or enter a QQ Music or Bilibili cookie
+2. Scan the QR code or enter a QQ Music cookie
 3. The credential is encrypted and stored server-side for playback or source-specific requests
 
 ### Customization

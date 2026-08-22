@@ -83,11 +83,9 @@ x-netease-cookie: <cookie字符串>
 | --- | --- | --- |
 | `id` | integer | 队列项 ID |
 | `track_id` | string | 媒体标识，例如 `netease:123456`、`qqmusic:003abc` |
-| `source` | string | 统一来源标识，例如 `netease`、`qqmusic`、`bilibili` |
+| `source` | string | 统一来源标识，例如 `netease`、`qqmusic` |
 | `song_id` | string | 网易云歌曲 ID，仅 `netease` 时返回 |
 | `song_mid` | string | QQ 音乐歌曲 MID，仅 `qqmusic` 时返回 |
-| `video_id` | string | B 站视频 ID，仅 `bilibili` 时返回 |
-| `webpage_url` | string | 原始视频页，仅 `bilibili` 时返回 |
 | `title` | string | 标题 |
 | `artist` | string | 艺术家 |
 | `album` | string | 专辑名 |
@@ -107,8 +105,6 @@ x-netease-cookie: <cookie字符串>
 | `source` | string | 统一来源标识 |
 | `song_id` | string | 网易云歌曲 ID，仅 `netease` 时返回 |
 | `song_mid` | string | QQ 音乐歌曲 MID，仅 `qqmusic` 时返回 |
-| `video_id` | string | B 站视频 ID，仅 `bilibili` 时返回 |
-| `webpage_url` | string | 原始视频页，仅 `bilibili` 时返回 |
 | `title` | string | 标题 |
 | `artist` | string | 艺术家 |
 | `album` | string | 专辑名 |
@@ -195,7 +191,7 @@ x-netease-cookie: <cookie字符串>
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `keywords` | string | 是 | 搜索关键词 |
-| `source` | string | 否 | `qqmusic`、`netease` 或 `bilibili`，默认 `qqmusic` |
+| `source` | string | 否 | `qqmusic` 或 `netease`，默认 `qqmusic` |
 | `limit` | integer | 否 | 默认 `20`，最大 `50` |
 | `page` | integer | 否 | 页码，从 `1` 开始 |
 
@@ -213,12 +209,6 @@ curl -H "Authorization: Bearer <token>" \
   "http://127.0.0.1:8009/external/search?source=qqmusic&keywords=林俊杰"
 ```
 
-B 站示例：
-
-```bash
-curl -H "Authorization: Bearer <token>" \
-  "http://127.0.0.1:8009/external/search?source=bilibili&keywords=周杰伦"
-```
 
 统一返回结构：
 
@@ -246,14 +236,6 @@ curl -H "Authorization: Bearer <token>" \
 
 QQ 音乐 `items` 里会使用 `song_mid` / `album_mid` 字段。
 
-B 站 `items` 里会使用 `video_id` / `webpage_url` 字段。
-
-当 `source=bilibili` 时，返回项还会尽量补充：
-
-- `description`：视频简介摘要
-- `likes`：点赞数
-- `favorites`：收藏数
-- `coins`：投币数
 
 ### 4.4 `POST /external/queue`
 
@@ -266,7 +248,7 @@ B 站 `items` 里会使用 `video_id` / `webpage_url` 字段。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `source` | string | 否 | `qqmusic`、`netease` 或 `bilibili`，默认 `qqmusic` |
+| `source` | string | 否 | `qqmusic` 或 `netease`，默认 `qqmusic` |
 | `keywords` | string | 否 | 按关键词自动搜索第一条 |
 | `song_id` | string | 否 | 网易云歌曲 ID |
 | `song_mid` | string | 否 | QQ 音乐歌曲 MID |
@@ -318,20 +300,6 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
   }'
 ```
 
-按 B 站视频立即播放示例：
-
-```bash
-curl -X POST "http://127.0.0.1:8009/external/queue" \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source": "bilibili",
-    "video_id": "BV1QQSDBWEGn",
-    "title": "【HiRes无损】周杰伦-太阳之子整张专辑 含歌词和单曲 共13首",
-    "artist": "太阳之子周杰伦专辑",
-    "play_now": true
-  }'
-```
 
 示例响应：
 
@@ -414,9 +382,8 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 说明：
 
 - 会根据历史项的 `track_id` 自动识别来源
-- 目前支持 `netease:*`、`qqmusic:*`、`bilibili:*`
+- 目前支持 `netease:*`、`qqmusic:*`
 - 网易云和 QQ 音乐会重新获取最新播放地址
-- B 站会重新解析视频信息，并在需要时重新准备本地缓存音频
 
 ### 4.11 `POST /external/player/action`
 
@@ -563,7 +530,6 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | --- | --- | --- |
 | `POST` | `/queue/netease` | 网易云歌曲入队 |
 | `POST` | `/queue/qqmusic` | QQ 音乐歌曲入队 |
-| `POST` | `/queue/bilibili` | B 站视频入队并在播放时下载音频 |
 | `GET` | `/queue` | 获取队列 |
 | `DELETE` | `/queue` | 清空队列 |
 | `POST` | `/queue` | 通用低层入队 |
@@ -625,28 +591,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 
 说明：`quality` 支持 `m4a`、`128` 和 `320`。非立即播放的 QQ 音乐队列项只保存歌曲 MID 和音质，真正开始播放时会使用管理员 Cookie 重新获取临时播放地址，因此不应把响应中的播放地址长期缓存。
 
-### 6.3 `POST /queue/bilibili`
-
-请求体：
-
-```json
-{
-  "video_id": "BV1QQSDBWEGn",
-  "title": "【HiRes无损】周杰伦-太阳之子整张专辑 含歌词和单曲 共13首",
-  "artist": "太阳之子周杰伦专辑",
-  "album": "音乐综合",
-  "duration_ms": 6555000,
-  "cover_url": "https://i0.hdslb.com/...",
-  "play_now": true
-}
-```
-
-说明：
-
-- `video_id` 支持 BV 号、av 号，或包含这两者的 B 站视频 URL
-- 实际播放前会先将音频下载到服务端本地缓存，再交给 `voice-service`
-
-### 6.4 `POST /queue`
+### 6.3 `POST /queue`
 
 这是最底层的通用入队接口，不会帮你解析平台歌曲信息。请求体：
 
@@ -659,7 +604,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 }
 ```
 
-### 6.5 `POST /history/{history_id}/replay`
+### 6.4 `POST /history/{history_id}/replay`
 
 查询参数：
 
@@ -669,7 +614,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 
 说明：
 
-- 支持 `netease:*`、`qqmusic:*`、`bilibili:*` 三类历史记录
+- 支持 `netease:*`、`qqmusic:*` 两类历史记录
 - 会重新解析新的播放 URL / 本地缓存，而不是重用旧 URL
 - QQ 音乐历史重播仍依赖服务端已配置的管理员 QQ 音乐 cookie
 
@@ -678,7 +623,7 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/search` | 网易云搜索，返回原始结构包装在 `raw` 里 |
-| `GET` | `/lyrics/{queue_item_id}` | 读取队列项歌词；B 站队列项会在可用时返回视频字幕时间轴，并在配置管理员 B 站登录态时尝试补抓 AI 字幕 |
+| `GET` | `/lyrics/{queue_item_id}` | 读取队列项歌词 |
 | `GET` | `/playlist/detail` | 按请求头里的 `x-netease-cookie` 查询歌单详情 |
 
 ### 7.1 `GET /search`
@@ -710,8 +655,6 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 - 队列项不存在时返回 `404`
 - 网易云会优先尝试服务端管理员 cookie
 - QQ 音乐会尝试使用服务端管理员 QQ 音乐 cookie
-- B 站队列项会尝试读取视频字幕，并按歌曲标题/歌手倾向选择更合适的语言轨道
-- 如果配置了管理员 B 站 Cookie，后端会在公开视频接口拿不到字幕时继续尝试登录态 API 和 Playwright 页面抓取
 
 ## 8. 网易云接口 `/netease/*`
 
@@ -789,36 +732,6 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
 - `requested_level`：本次请求的标准化音质
 - `level`：上游实际返回的音质等级
 - `br`：上游实际返回的码率
-
-## 9. B 站接口 `/bilibili/*`
-
-### 9.1 搜索接口
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/bilibili/search/videos` | 搜索 B 站视频，返回统一后的结果结构 |
-
-关键参数：
-
-| 路径 | 参数 | 说明 |
-| --- | --- | --- |
-| `/bilibili/search/videos` | `keywords` | 搜索词 |
-| `/bilibili/search/videos` | `limit` | 默认 `20`，最大 `50` |
-| `/bilibili/search/videos` | `page` | 默认 `1` |
-
-返回项里的核心字段：
-
-- `video_id`：BV 号或 av 号
-- `title`：视频标题
-- `artist`：UP 主名称
-- `album`：视频分区或分类
-- `description`：简介摘要
-- `duration_ms`：时长，毫秒
-- `artwork_url`：封面 URL
-- `likes`：点赞数
-- `favorites`：收藏数
-- `coins`：投币数
-- `webpage_url`：原始 B 站视频页
 
 ## 10. QQ 音乐接口 `/qqmusic/*`
 
@@ -949,51 +862,6 @@ curl -X POST "http://127.0.0.1:8009/external/queue" \
   "auth_url": "https://graph.qq.com/..."
 }
 ```
-
-### 11.3 B 站管理员接口
-
-| 方法 | 路径 | 是否需要 admin token | 说明 |
-| --- | --- | --- | --- |
-| `GET` | `/admin/bilibili/status` | 是 | 是否已保存管理员 B 站 cookie，以及 Playwright 是否可用 |
-| `GET` | `/admin/bilibili/account` | 是 | 当前管理员 B 站账号信息 |
-| `POST` | `/admin/bilibili/cookie` | 是 | 写入管理员 B 站 cookie |
-| `POST` | `/admin/bilibili/qr/start` | 是 | 创建 B 站二维码登录会话并返回二维码图片 |
-| `GET` | `/admin/bilibili/qr/check` | 是 | 轮询二维码登录状态，授权成功时保存管理员 cookie |
-
-`POST /admin/bilibili/cookie` 请求体：
-
-```json
-{
-  "cookie": "SESSDATA=...; bili_jct=..."
-}
-```
-
-`GET /admin/bilibili/status` 响应示例：
-
-```json
-{
-  "admin_cookie_set": true,
-  "playwright_available": true,
-  "playwright_dependency_installed": true
-}
-```
-
-`POST /admin/bilibili/qr/start` 响应示例：
-
-```json
-{
-  "session_id": "5f8f5c4e...",
-  "qrcode_key": "bfb1d1caaffe7fac02522b3b32089d70",
-  "qr_url": "https://account.bilibili.com/...",
-  "qr_image_base64": "iVBORw0KGgoAAA..."
-}
-```
-
-`GET /admin/bilibili/qr/check` 查询参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `session_id` | string | 是 | `POST /admin/bilibili/qr/start` 返回的登录会话 ID |
 
 ## 12. 常见调用流程
 
