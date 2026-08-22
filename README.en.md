@@ -61,10 +61,11 @@ The default ports are web 8080, backend 8009, and voice-service gRPC 50051. To u
 
 ~~~bash
 docker compose -f docker-compose.prebuilt.yml up -d
-TSBOT_IMAGE_TAG=v0.4.0 docker compose -f docker-compose.prebuilt.yml up -d
+# Pin to an image version from a GitHub Release:
+TSBOT_IMAGE_TAG=vX.Y.Z docker compose -f docker-compose.prebuilt.yml up -d
 ~~~
 
-Existing container image names may retain historical naming. Check docker-compose.prebuilt.yml before changing registry, namespace, or tag.
+When a push to `main` or `master` matches the publishing paths, Docker Publish builds all three service images. After they succeed, it increments the patch version of the latest stable `vX.Y.Z` tag, creates a GitHub Release, and pushes images with that same tag. Existing container image names may retain historical naming. Check docker-compose.prebuilt.yml before changing registry, namespace, or tag.
 
 ## QQ Music Authorization
 

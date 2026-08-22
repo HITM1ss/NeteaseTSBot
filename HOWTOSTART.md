@@ -243,8 +243,8 @@ docker compose down
 # Docker Hub（默认 latest）
 docker compose -f docker-compose.prebuilt.yml up -d
 
-# 固定版本，例如 v0.4.0
-TSBOT_IMAGE_TAG=v0.4.0 docker compose -f docker-compose.prebuilt.yml up -d
+# 固定到某个 GitHub Release 对应的镜像版本
+TSBOT_IMAGE_TAG=vX.Y.Z docker compose -f docker-compose.prebuilt.yml up -d
 
 # 改用 GHCR
 TSBOT_IMAGE_REGISTRY=ghcr.io \
@@ -257,6 +257,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
 - GitHub **Packages** 页面显示的是 GHCR 包；如果只推 Docker Hub，这里会是空的。
 - 现在看到 `backend` / `web` / `voice-service` 三个镜像仓库是正常的，因为当前发布策略就是按三个服务分别构建。
 - GitHub **Releases** 页面里的 `tar.gz` 与 `SHA256SUMS.txt` 是软件包归档，不是 Docker 镜像。
+- 推送到 `main` 或 `master` 且命中发布路径时，Docker Publish 成功后会自动递增最新稳定 `vX.Y.Z` 标签的补丁版本、创建 Git tag 与 GitHub Release，并为三个镜像推送同名 tag。
 
 ## 启动配置与 Web 系统配置
 

@@ -69,11 +69,11 @@ docker compose logs -f voice-service
 
 ~~~bash
 docker compose -f docker-compose.prebuilt.yml up -d
-# 固定版本示例：
-TSBOT_IMAGE_TAG=v0.4.0 docker compose -f docker-compose.prebuilt.yml up -d
+# 固定到某个 GitHub Release 对应的镜像版本：
+TSBOT_IMAGE_TAG=vX.Y.Z docker compose -f docker-compose.prebuilt.yml up -d
 ~~~
 
-镜像仓库名可能沿用历史命名；切换镜像前请确认 docker-compose.prebuilt.yml 中的 namespace、registry 和 tag。
+推送到 `main` 或 `master` 且命中发布路径时，Docker Publish 会构建三个服务镜像；全部成功后会自动递增最新稳定 `vX.Y.Z` 标签的补丁版本、创建 GitHub Release，并推送同名镜像标签。镜像仓库名可能沿用历史命名；切换镜像前请确认 docker-compose.prebuilt.yml 中的 namespace、registry 和 tag。
 
 ## QQ 音乐授权与点歌
 
