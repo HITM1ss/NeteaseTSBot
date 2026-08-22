@@ -39,7 +39,7 @@ class SettingDefinition:
 
 
 DEFINITIONS: tuple[SettingDefinition, ...] = (
-    SettingDefinition("web.app_name", "web", "界面名称", env="TSBOT_WEB_APP_NAME", default="Yumi TSBot", backend_attr="web_app_name"),
+    SettingDefinition("web.app_name", "web", "界面名称", env="TSBOT_WEB_APP_NAME", default="QQ music TSBot", backend_attr="web_app_name"),
     SettingDefinition("web.log_level", "web", "Web 日志等级", type="select", env="VITE_LOG_LEVEL", default="INFO", options=("DEBUG", "INFO", "WARN", "ERROR"), backend_attr="web_log_level"),
     SettingDefinition("backend.voice_grpc_addr", "backend", "Voice gRPC 地址", env="TSBOT_VOICE_GRPC_ADDR", default="127.0.0.1:50051", backend_attr="voice_grpc_addr"),
     SettingDefinition("backend.log_level", "backend", "后端日志等级", type="select", env="TSBOT_LOG_LEVEL", default="INFO", options=("DEBUG", "INFO", "WARNING", "ERROR"), backend_attr="log_level"),
@@ -113,6 +113,15 @@ def initialize_runtime_settings(session: Session) -> None:
             continue
         session.add(AppSetting(key=definition.key, value=_serialize(definition, value)))
         changed = True
+
+    # Upgrade the former built-in UI name, but never overwrite an administrator
+    # who has already chosen a different custom name.
+    app_name_definition = DEFINITION_BY_KEY["web.app_name"]
+    app_name = session.get(AppSetting, app_name_definition.key)
+    if app_name is not None and get_value(session, app_name_definition) == "Yumi TSBot":
+        app_name.value = _serialize(app_name_definition, app_name_definition.default)
+        changed = True
+
     pending = session.get(AppSetting, PENDING_EFFECTS_KEY)
     if pending is not None:
         session.delete(pending)

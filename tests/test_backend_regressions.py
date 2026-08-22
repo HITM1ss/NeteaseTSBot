@@ -3,8 +3,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
 
 from backend import main
+from backend.db import Base
 
 
 class AdminCacheTests(unittest.TestCase):
@@ -96,7 +99,7 @@ class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("使用 select <编号>", notice.await_args_list[0].args[0])
         self.assertIn("已从歌单《测试歌单》加入 2 首歌曲", notice.await_args_list[1].args[0])
 
-    async def test_keyword_play_uses_qqmusic(self) -> None:
+    async def test_point_song_prioritizes_the_qqmusic_request(self) -> None:
         songs = [{
             "songmid": "mid12345",
             "name": "测试歌曲",
@@ -120,13 +123,14 @@ class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
             artist="测试歌手",
             play_now=False,
             requested_by="Alice",
+            prioritize=True,
             quality="320",
             album_mid="alb123",
             album="测试专辑",
             artwork_url="https://y.gtimg.cn/music/photo_new/T002R300x300M000alb123.jpg",
             duration_ms=210000,
         )
-        self.assertIn("已加入队列", notice.await_args.args[0])
+        self.assertIn("已置顶，将在下一首播放", notice.await_args.args[0])
 
     async def test_search_uses_qqmusic(self) -> None:
         songs = [{
@@ -160,6 +164,7 @@ class TsChatCommandTests(unittest.IsolatedAsyncioTestCase):
             artist="",
             play_now=False,
             requested_by="Alice",
+            prioritize=False,
             quality="320",
             album_mid="",
             album="",
@@ -364,6 +369,7 @@ class ExternalQQMusicDefaultTests(unittest.IsolatedAsyncioTestCase):
 class QQMusicQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_queued_song_defers_url_lookup_until_playback(self) -> None:
         session = unittest.mock.Mock()
+        session.execute.return_value.scalar.return_value = None
         with (
             patch.object(main, "new_session", return_value=session),
             patch.object(
@@ -393,10 +399,188 @@ class QQMusicQueueTests(unittest.IsolatedAsyncioTestCase):
         set_cookie.assert_called_once_with("qq-cookie")
         get_url.assert_not_awaited()
         created = queue_item.call_args.kwargs
+        self.assertEqual(1, created["queue_position"])
         self.assertEqual("__qqmusic_quality__:320", created["source_url"])
         self.assertEqual("测试专辑", created["album"])
         self.assertEqual("https://example.test/cover.jpg", created["cover_url"])
         session.close.assert_called_once_with()
+
+    async def test_prioritized_song_is_queued_after_the_current_song(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        session_factory = sessionmaker(bind=engine)
+        Base.metadata.create_all(engine)
+        seed_session = session_factory()
+        try:
+            current = main.QueueItem(
+                track_id="qqmusic:current",
+                queue_position=1,
+                title="当前歌曲",
+                source_url="current-source",
+            )
+            waiting_one = main.QueueItem(
+                track_id="qqmusic:waiting-one",
+                queue_position=2,
+                title="等待歌曲一",
+                source_url="waiting-one-source",
+            )
+            waiting_two = main.QueueItem(
+                track_id="qqmusic:waiting-two",
+                queue_position=3,
+                title="等待歌曲二",
+                source_url="waiting-two-source",
+            )
+            seed_session.add_all([current, waiting_one, waiting_two])
+            seed_session.commit()
+            current_id = int(current.id)
+        finally:
+            seed_session.close()
+
+        try:
+            with (
+                patch.object(main, "new_session", side_effect=session_factory),
+                patch.object(main, "_get_admin_qqmusic_cookie", return_value="qq-cookie"),
+                patch.object(main.qqmusic, "set_cookie"),
+                patch.object(main, "_schedule_ts_description_update"),
+                patch.object(main, "_current_queue_item_id", current_id),
+                patch.object(main, "_pending_queue_item_id", None),
+            ):
+                await main._enqueue_qqmusic_song(
+                    song_mid="priority-mid",
+                    title="置顶歌曲",
+                    artist="测试歌手",
+                    play_now=False,
+                    requested_by="Alice",
+                    prioritize=True,
+                )
+
+            check_session = session_factory()
+            try:
+                rows = check_session.execute(
+                    select(main.QueueItem).order_by(main.QueueItem.queue_position.asc())
+                ).scalars().all()
+            finally:
+                check_session.close()
+
+            self.assertEqual(["当前歌曲", "置顶歌曲", "等待歌曲一", "等待歌曲二"], [row.title for row in rows])
+            self.assertEqual([0, 1, 2, 3], [row.queue_position for row in rows])
+        finally:
+            engine.dispose()
+
+    async def test_web_prioritize_moves_an_existing_song_after_the_current_song(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        session_factory = sessionmaker(bind=engine)
+        Base.metadata.create_all(engine)
+        seed_session = session_factory()
+        try:
+            current = main.QueueItem(
+                track_id="qqmusic:current",
+                queue_position=1,
+                title="当前歌曲",
+                source_url="current-source",
+            )
+            waiting_one = main.QueueItem(
+                track_id="qqmusic:waiting-one",
+                queue_position=2,
+                title="等待歌曲一",
+                source_url="waiting-one-source",
+            )
+            target = main.QueueItem(
+                track_id="qqmusic:target",
+                queue_position=3,
+                title="置顶歌曲",
+                source_url="target-source",
+            )
+            waiting_two = main.QueueItem(
+                track_id="qqmusic:waiting-two",
+                queue_position=4,
+                title="等待歌曲二",
+                source_url="waiting-two-source",
+            )
+            seed_session.add_all([current, waiting_one, target, waiting_two])
+            seed_session.commit()
+            current_id = int(current.id)
+            target_id = int(target.id)
+        finally:
+            seed_session.close()
+
+        action_session = session_factory()
+        try:
+            with (
+                patch.object(main, "_current_queue_item_id", current_id),
+                patch.object(main, "_pending_queue_item_id", None),
+                patch.object(main, "_shuffle_enabled", False),
+                patch.object(main, "_schedule_ts_description_update") as update_description,
+            ):
+                result = await main.prioritize_queue_item(target_id, session=action_session)
+
+            self.assertEqual({"ok": True, "id": target_id, "action": "prioritized"}, result)
+            update_description.assert_called_once_with()
+        finally:
+            action_session.close()
+
+        check_session = session_factory()
+        try:
+            rows = check_session.execute(
+                select(main.QueueItem).order_by(main.QueueItem.queue_position.asc())
+            ).scalars().all()
+        finally:
+            check_session.close()
+
+        self.assertEqual(
+            ["当前歌曲", "置顶歌曲", "等待歌曲一", "等待歌曲二"],
+            [row.title for row in rows],
+        )
+        self.assertEqual([0, 1, 2, 3], [row.queue_position for row in rows])
+        engine.dispose()
+
+    async def test_prioritized_existing_song_follows_current_song_in_shuffle_mode(self) -> None:
+        with (
+            patch.object(main, "_shuffle_enabled", True),
+            patch.object(main, "_shuffle_queue", [1, 2, 3, 4]),
+            patch.object(main, "_current_shuffle_index", 1),
+        ):
+            main._place_item_next_in_shuffle_queue(item_id=1, active_item_id=2)
+
+            self.assertEqual([2, 1, 3, 4], main._shuffle_queue)
+            self.assertEqual(0, main._current_shuffle_index)
+
+    async def test_auto_play_uses_the_persisted_queue_position(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        session_factory = sessionmaker(bind=engine)
+        Base.metadata.create_all(engine)
+        seed_session = session_factory()
+        try:
+            regular = main.QueueItem(
+                track_id="qqmusic:regular",
+                queue_position=2,
+                title="普通歌曲",
+                source_url="regular-source",
+            )
+            prioritized = main.QueueItem(
+                track_id="qqmusic:priority",
+                queue_position=1,
+                title="置顶歌曲",
+                source_url="priority-source",
+            )
+            seed_session.add_all([regular, prioritized])
+            seed_session.commit()
+            prioritized_id = int(prioritized.id)
+        finally:
+            seed_session.close()
+
+        try:
+            with (
+                patch.object(main, "new_session", side_effect=session_factory),
+                patch.object(main, "_shuffle_enabled", False),
+                patch.object(main, "_repeat_mode", "none"),
+                patch.object(main, "_current_queue_item_id", None),
+                patch.object(main, "_play_queue_item_internal", AsyncMock(return_value=True)) as play_item,
+            ):
+                await main._auto_play_next_from_queue()
+
+            play_item.assert_awaited_once_with(prioritized_id, requested_by="auto")
+        finally:
+            engine.dispose()
 
     async def test_playing_queued_song_refreshes_qqmusic_url(self) -> None:
         queued = SimpleNamespace(

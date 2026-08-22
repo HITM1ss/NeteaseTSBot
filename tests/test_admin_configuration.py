@@ -20,7 +20,7 @@ from backend.auth import (
 )
 from backend.config import settings
 from backend.db import Base
-from backend.models import AdminCredential
+from backend.models import AdminCredential, AppSetting
 from backend import managed_assets
 from backend.managed_assets import ASSET_BY_KEY, asset_path, delete_asset, save_asset, validate_image
 from backend.runtime_config import (
@@ -183,6 +183,17 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertEqual("teamspeak", fields["voice.description_intro"]["group"])
         self.assertEqual("backend", fields["voice.log_level"]["group"])
         self.assertEqual("backend", fields["voice.state_file"]["group"])
+
+    def test_legacy_default_app_name_is_migrated(self) -> None:
+        definition = DEFINITION_BY_KEY["web.app_name"]
+        row = self.session.get(AppSetting, definition.key)
+        assert row is not None
+        row.value = json.dumps("Yumi TSBot", ensure_ascii=False)
+        self.session.commit()
+
+        initialize_runtime_settings(self.session)
+
+        self.assertEqual("QQ music TSBot", get_value(self.session, definition))
 
     def test_managed_asset_upload_uses_fixed_path_and_validates_signature(self) -> None:
         icon = ASSET_BY_KEY["web-app-icon"]

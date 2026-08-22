@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     initial_admin_password: str = ""
     initial_password_file: str = "./logs/initial-admin-password.txt"
     voice_config_file: str = "./logs/voice-service.json"
-    web_app_name: str = "Yumi TSBot"
+    web_app_name: str = "QQ music TSBot"
     web_app_icon: str = ""
     web_log_level: str = "INFO"
     voice_description_title: str = "Yumi TSBot"

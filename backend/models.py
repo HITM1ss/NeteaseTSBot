@@ -55,6 +55,9 @@ class QueueItem(Base):
     __tablename__ = "queue_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # The queue order is independent from the immutable database ID so a
+    # requested song can be moved to the next playable position.
+    queue_position: Mapped[int] = mapped_column(Integer, default=0, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now, index=True)
 
     track_id: Mapped[str] = mapped_column(String(64), index=True)

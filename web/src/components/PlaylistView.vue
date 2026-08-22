@@ -186,6 +186,15 @@
               <!-- Actions -->
               <div class="flex items-center gap-1 md:opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
+                  @click.stop="prioritizeTrack(track)"
+                  :disabled="pinningTrackId !== null"
+                  class="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="置顶为下一首播放"
+                >
+                  <ArrowUpToLine :size="16" />
+                </button>
+
+                <button
                   @click.stop="toggleLike(track)"
                   :class="[
                     'p-1.5 rounded-lg transition-colors',
@@ -224,6 +233,7 @@ import {
   Search,
   RefreshCw,
   AlertCircle,
+  ArrowUpToLine,
   GripVertical,
   Trash2,
   ListMusic
@@ -256,6 +266,7 @@ const searchQuery = ref('')
 const selectedTracks = ref<Set<number>>(new Set())
 const currentPlayingId = ref<number | null>(null)
 const isDragging = ref(false)
+const pinningTrackId = ref<number | null>(null)
 let refreshTimer: number | null = null
 
 // Filter tracks based on search
@@ -332,6 +343,21 @@ async function playTrack(track: Track) {
     currentPlayingId.value = track.id
   } catch (e: any) {
     showActionError(`播放失败: ${String(e?.message ?? e)}`)
+  }
+}
+
+// Move a song to the next playable position without stopping the current song.
+async function prioritizeTrack(track: Track) {
+  if (pinningTrackId.value !== null) return
+
+  pinningTrackId.value = track.id
+  try {
+    await apiPost(`/queue/${track.id}/prioritize`, {})
+    await loadTracks()
+  } catch (e: any) {
+    showActionError(`置顶失败: ${String(e?.message ?? e)}`)
+  } finally {
+    pinningTrackId.value = null
   }
 }
 

@@ -292,13 +292,13 @@ DATABASE_URL=sqlite:///./tsbot.db
 
 - 首次启动后，从后端日志或 `logs/initial-admin-password.txt` 取得 `admin` 的初始密码。
 - 第一次登录会强制更换密码，成功后初始密码文件自动删除。
-- TeamSpeak / TS6、网易云 API、缓存、日志、外部 Token、界面名称都在 Web 的“系统配置”中维护。
+- TeamSpeak / TS6、QQ 音乐授权、日志、外部 Token、界面名称都在 Web 的“系统配置”中维护。
 - 界面图标和 TeamSpeak 机器人头像在 Web 设置页直接上传，固定保存在数据库目录旁的 `uploads/` 中；不再填写服务器图片路径。
 - “保存配置”只将表单持久化到数据库；“应用配置”才会更新运行服务。应用 TeamSpeak 或 Voice 改动后，voice-service 会优雅断开并自动用新配置重启，Web 在新进程返回后提示“已重启成功”。
 - “TeamSpeak 配置”包含连接、频道、身份和客户端简介；“Voice 服务”包含后端到 Voice 的连接与 Voice 运行参数。
 - 旧部署的 `TSBOT_TS3_*` 等变量会在数据库缺少对应值时导入一次，迁移后可从环境文件删除。
 - QQ 音乐能力由后端内建提供，不需要额外部署独立的 QQ 音乐 API 服务。
-- 网易云、QQ 音乐和 B 站授权统一位于“系统配置 → 音乐会员登录”；管理员 Cookie 写入数据库并使用 `TSBOT_COOKIE_KEY` 加密存储。
+- QQ 音乐授权位于“系统配置 → 音乐会员登录”；管理员 Cookie 写入数据库并使用 `TSBOT_COOKIE_KEY` 加密存储。
 - 忘记密码可在服务器本地执行 `.venv/bin/python -m backend.admin_cli reset-password`。
 
 ## 音乐源支持

@@ -20,7 +20,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .crypto import decrypt_text, encrypt_text
-from .db import create_db_and_tables, get_database_url, get_session, get_sqlite_db_path, new_session
+from .db import (
+    create_db_and_tables,
+    get_database_url,
+    get_session,
+    get_sqlite_db_path,
+    new_session,
+)
 from .models import AdminCredential, HistoryItem, QueueItem, Secret
 from .auth import (
     clear_session_cookie,
@@ -363,17 +369,16 @@ async def _build_ts_description(*, queue_preview: int = 5) -> str:
             else:
                 lines.append("正在播放: (未知)")
 
-            q = (
-                select(QueueItem)
-                .where(QueueItem.id >= int(cur_id))
-                .order_by(QueueItem.id.asc())
-                .limit(int(queue_preview))
+            queue_items = _ordered_queue_items(session)
+            current_index = next(
+                (index for index, row in enumerate(queue_items) if int(row.id) == int(cur_id)),
+                None,
             )
-            rows = session.execute(q).scalars().all()
+            rows = queue_items[current_index:] if current_index is not None else queue_items
+            rows = rows[:int(queue_preview)]
         else:
             lines.append("状态: 空闲")
-            q = select(QueueItem).order_by(QueueItem.id.asc()).limit(int(queue_preview))
-            rows = session.execute(q).scalars().all()
+            rows = _ordered_queue_items(session)[:int(queue_preview)]
 
         if rows:
             lines.append("队列:")
@@ -754,7 +759,7 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
             # shuffled order in sync while preserving the existing random order.
             queued_ids = [
                 int(row.id)
-                for row in session.execute(select(QueueItem).order_by(QueueItem.id.asc())).scalars().all()
+                for row in _ordered_queue_items(session)
             ]
             queued_id_set = set(queued_ids)
             current_shuffle_id = (
@@ -794,16 +799,20 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
             else:
                 # Get next track in regular order
                 if cursor_id:
-                    nxt = session.execute(
-                        select(QueueItem)
-                        .where(QueueItem.id > cursor_id)
-                        .order_by(QueueItem.id.asc())
-                        .limit(1)
-                    ).scalars().first()
+                    queue_items = _ordered_queue_items(session)
+                    cursor_index = next(
+                        (index for index, row in enumerate(queue_items) if int(row.id) == int(cursor_id)),
+                        None,
+                    )
+                    nxt = (
+                        queue_items[cursor_index + 1]
+                        if cursor_index is not None and cursor_index + 1 < len(queue_items)
+                        else (queue_items[0] if cursor_index is None and queue_items else None)
+                    )
                 else:
                     nxt = session.execute(
                         select(QueueItem)
-                        .order_by(QueueItem.id.asc())
+                        .order_by(*_queue_order_by())
                         .limit(1)
                     ).scalars().first()
                 
@@ -812,7 +821,7 @@ async def _auto_play_next_from_queue(*, start_after_id: int | None = None) -> No
                         # Loop back to beginning
                         nxt = session.execute(
                             select(QueueItem)
-                            .order_by(QueueItem.id.asc())
+                            .order_by(*_queue_order_by())
                             .limit(1)
                         ).scalars().first()
                         if not nxt:
@@ -1374,12 +1383,12 @@ async def voice_previous() -> dict:
                 cursor_item_id = _current_queue_item_id or _pending_queue_item_id
 
             if cursor_item_id:
-                prev = session.execute(
-                    select(QueueItem)
-                    .where(QueueItem.id < cursor_item_id)
-                    .order_by(QueueItem.id.desc())
-                    .limit(1)
-                ).scalars().first()
+                queue_items = _ordered_queue_items(session)
+                current_index = next(
+                    (index for index, row in enumerate(queue_items) if int(row.id) == int(cursor_item_id)),
+                    None,
+                )
+                prev = queue_items[current_index - 1] if current_index and current_index > 0 else None
                 
                 if prev:
                     await _play_queue_item_internal(int(prev.id), requested_by="previous")
@@ -1388,7 +1397,7 @@ async def voice_previous() -> dict:
                     # Go to last track
                     last = session.execute(
                         select(QueueItem)
-                        .order_by(QueueItem.id.desc())
+                        .order_by(QueueItem.queue_position.desc(), QueueItem.id.desc())
                         .limit(1)
                     ).scalars().first()
                     
@@ -1454,7 +1463,7 @@ async def _set_shuffle_enabled(enabled: bool) -> dict:
     if _shuffle_enabled:
         session = new_session()
         try:
-            queue_items = session.execute(select(QueueItem).order_by(QueueItem.id.asc())).scalars().all()
+            queue_items = _ordered_queue_items(session)
             _shuffle_queue = [int(item.id) for item in queue_items]
             random.shuffle(_shuffle_queue)
 
@@ -1598,6 +1607,7 @@ def _format_help() -> str:
     lines.extend([
         "搜索|search <keywords> - search QQ Music songs",
         "增加|add <song_mid|keywords> - add a QQ Music song to the queue",
+        "点歌 <song_mid|keywords> - add a QQ Music song to play next",
         "播放|play [song_mid|keywords] - play a QQ Music song; no argument plays the first queue item",
         "歌单|playlist <keywords> - search QQ Music playlists",
         "选择|select <number> - add a playlist from the last QQ Music playlist search",
@@ -1660,6 +1670,115 @@ def _get_ts_playlist_results(key: str) -> list[dict[str, str]]:
     return playlists
 
 
+def _queue_order_by() -> tuple[object, object]:
+    return QueueItem.queue_position.asc(), QueueItem.id.asc()
+
+
+def _ordered_queue_items(session: Session) -> list[QueueItem]:
+    return session.execute(select(QueueItem).order_by(*_queue_order_by())).scalars().all()
+
+
+def _queue_position_for_new_item(
+    session: Session,
+    *,
+    prioritize: bool,
+    active_item_id: int | None = None,
+) -> int:
+    """Return a position for a new queue item and make room when needed."""
+    if not prioritize:
+        max_position = session.execute(select(func.max(QueueItem.queue_position))).scalar()
+        try:
+            return max(0, int(max_position or 0)) + 1
+        except (TypeError, ValueError):
+            return 1
+
+    rows = _ordered_queue_items(session)
+    active_item = next(
+        (row for row in rows if int(row.id) == int(active_item_id)),
+        None,
+    ) if active_item_id is not None else None
+
+    if active_item is not None:
+        # Keep the song already playing first. The new request then becomes the
+        # first waiting song and will play next without interrupting playback.
+        active_item.queue_position = 0
+        rows = [row for row in rows if int(row.id) != int(active_item.id)]
+
+    for position, row in enumerate(rows, start=2):
+        row.queue_position = position
+    return 1
+
+
+def _prioritize_existing_queue_item(
+    session: Session,
+    item: QueueItem,
+    *,
+    active_item_id: int | None = None,
+) -> bool:
+    """Move an existing item to the next playable position.
+
+    The active item stays first so moving a song to the top never interrupts
+    the song that is already playing (or currently being prepared).
+    """
+    rows = _ordered_queue_items(session)
+    active_item = next(
+        (row for row in rows if int(row.id) == int(active_item_id)),
+        None,
+    ) if active_item_id is not None else None
+
+    if active_item is not None and int(active_item.id) == int(item.id):
+        return False
+
+    if active_item is not None:
+        active_item.queue_position = 0
+
+    item.queue_position = 1
+    other_rows = [
+        row
+        for row in rows
+        if int(row.id) not in {int(item.id), int(active_item.id) if active_item else -1}
+    ]
+    for position, row in enumerate(other_rows, start=2):
+        row.queue_position = position
+    return True
+
+
+def _place_item_next_in_shuffle_queue(item_id: int, active_item_id: int | None) -> None:
+    """Make a prioritized request play next even while shuffle is enabled."""
+    global _current_shuffle_index, _shuffle_queue
+
+    if not _shuffle_enabled:
+        return
+
+    current_shuffle_id = (
+        _shuffle_queue[_current_shuffle_index]
+        if 0 <= _current_shuffle_index < len(_shuffle_queue)
+        else None
+    )
+    _shuffle_queue[:] = [queued_id for queued_id in _shuffle_queue if queued_id != item_id]
+    if current_shuffle_id in _shuffle_queue:
+        _current_shuffle_index = _shuffle_queue.index(current_shuffle_id)
+    elif _current_shuffle_index >= len(_shuffle_queue):
+        _current_shuffle_index = len(_shuffle_queue) - 1
+
+    insert_at: int | None = None
+    if active_item_id is not None:
+        try:
+            insert_at = _shuffle_queue.index(active_item_id) + 1
+        except ValueError:
+            insert_at = None
+    if insert_at is None and 0 <= _current_shuffle_index < len(_shuffle_queue):
+        insert_at = _current_shuffle_index + 1
+    if insert_at is None:
+        insert_at = 0
+
+    _shuffle_queue.insert(insert_at, item_id)
+    if current_shuffle_id in _shuffle_queue:
+        _current_shuffle_index = _shuffle_queue.index(current_shuffle_id)
+    elif insert_at <= _current_shuffle_index:
+        _current_shuffle_index += 1
+
+
 async def _enqueue_qqmusic_song(
     *,
     song_mid: str,
@@ -1667,6 +1786,7 @@ async def _enqueue_qqmusic_song(
     artist: str,
     play_now: bool,
     requested_by: str,
+    prioritize: bool = False,
     quality: str = "320",
     album_mid: str = "",
     album: str = "",
@@ -1695,10 +1815,21 @@ async def _enqueue_qqmusic_song(
         if not album_cover_url and album_mid:
             album_cover_url = qqmusic.get_song_cover_image(album_mid)
         resolved_duration_ms = int(duration_ms) if duration_ms is not None and int(duration_ms) > 0 else 0
+
+        active_item_id: int | None = None
+        if prioritize:
+            async with _playback_lock:
+                active_item_id = _current_queue_item_id or _pending_queue_item_id
+        queue_position = _queue_position_for_new_item(
+            session,
+            prioritize=prioritize,
+            active_item_id=active_item_id,
+        )
         
         # Create queue item
         item = QueueItem(
             track_id=f"qqmusic:{song_mid}",
+            queue_position=queue_position,
             title=title,
             artist=artist,
             album=album,
@@ -1708,6 +1839,9 @@ async def _enqueue_qqmusic_song(
         )
         session.add(item)
         session.commit()
+
+        if prioritize:
+            _place_item_next_in_shuffle_queue(int(item.id), active_item_id)
 
         _schedule_ts_description_update()
 
@@ -1853,6 +1987,7 @@ async def _handle_chat_command(
     if not cmd:
         return
     arg = tail.strip()
+    prioritize_request = head_norm == "点歌"
     invoker_key = _ts_playlist_result_key(
         invoker_unique_id=invoker_unique_id,
         invoker_name=invoker_name,
@@ -1889,7 +2024,7 @@ async def _handle_chat_command(
             session = new_session()
             try:
                 total = int(session.execute(select(func.count(QueueItem.id))).scalar() or 0)
-                rows = session.execute(select(QueueItem).order_by(QueueItem.id.asc()).limit(5)).scalars().all()
+                rows = _ordered_queue_items(session)[:5]
                 if not rows:
                     await reply("队列为空")
                     return
@@ -2185,7 +2320,7 @@ async def _handle_chat_command(
                 lines.append(
                     f"{i}. {song['song_mid']} {song['title']} - {song['artist']}".strip(" -")
                 )
-            await reply("QQ 音乐搜索结果（可直接用 add/play + song_mid）：\n" + "\n".join(lines))
+            await reply("QQ 音乐搜索结果（可直接用 点歌/add/play + song_mid）：\n" + "\n".join(lines))
             return
 
         if cmd == "play" and not arg:
@@ -2195,7 +2330,7 @@ async def _handle_chat_command(
             first_artist = ""
             try:
                 first_item = session.execute(
-                    select(QueueItem).order_by(QueueItem.id.asc()).limit(1)
+                    select(QueueItem).order_by(*_queue_order_by()).limit(1)
                 ).scalars().first()
                 if first_item is not None:
                     first_item_id = int(first_item.id)
@@ -2259,6 +2394,7 @@ async def _handle_chat_command(
                 artist=artist,
                 play_now=(cmd == "play"),
                 requested_by=invoker_name,
+                prioritize=prioritize_request,
                 quality="320",
                 album_mid=album_mid,
                 album=album,
@@ -2281,11 +2417,14 @@ async def _handle_chat_command(
                     await _auto_play_next_from_queue()
                     auto_started = True
             except Exception as e:
-                await reply(f"已加入队列: #{item_id} {song_label} {extra}\n点歌: {invoker_name}\n自动播放失败: {e}")
+                action = "已置顶" if prioritize_request else "已加入队列"
+                await reply(f"{action}: #{item_id} {song_label} {extra}\n点歌: {invoker_name}\n自动播放失败: {e}")
                 return
 
             if auto_started:
-                await reply(f"已加入队列并开始播放: #{item_id} {song_label} {extra}\n点歌: {invoker_name}")
+                await reply(f"已置顶并开始播放: #{item_id} {song_label} {extra}\n点歌: {invoker_name}")
+            elif prioritize_request:
+                await reply(f"已置顶，将在下一首播放: #{item_id} {song_label} {extra}\n点歌: {invoker_name}")
             else:
                 await reply(f"已加入队列: #{item_id} {song_label} {extra}\n点歌: {invoker_name}")
 
@@ -2692,7 +2831,7 @@ async def add_queue_qqmusic(req: AddQQMusicQueueRequest) -> dict:
 
 @app.get("/queue")
 def get_queue(session: Session = Depends(get_session)) -> list[dict]:
-    rows = session.execute(select(QueueItem).order_by(QueueItem.id.asc())).scalars().all()
+    rows = _ordered_queue_items(session)
     return [_serialize_queue_item(row) for row in rows]
 
 
@@ -2705,6 +2844,7 @@ async def clear_queue(session: Session = Depends(get_session)) -> dict:
 def add_queue(req: AddQueueRequest, session: Session = Depends(get_session)) -> dict:
     item = QueueItem(
         track_id=req.track_id,
+        queue_position=_queue_position_for_new_item(session, prioritize=False),
         title=req.title,
         artist=req.artist,
         source_url=req.source_url,
@@ -2732,6 +2872,30 @@ def delete_queue_item(item_id: int, session: Session = Depends(get_session)) -> 
 
     _schedule_ts_description_update()
     return {"ok": True}
+
+
+@app.post("/queue/{item_id}/prioritize")
+async def prioritize_queue_item(item_id: int, session: Session = Depends(get_session)) -> dict:
+    """Move a queued song to play next without interrupting playback."""
+    item = session.get(QueueItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="queue item not found")
+
+    async with _playback_lock:
+        active_item_id = _current_queue_item_id or _pending_queue_item_id
+
+    moved = _prioritize_existing_queue_item(
+        session,
+        item,
+        active_item_id=active_item_id,
+    )
+    if not moved:
+        return {"ok": True, "id": item_id, "action": "already_current"}
+
+    session.commit()
+    _place_item_next_in_shuffle_queue(item_id, active_item_id)
+    _schedule_ts_description_update()
+    return {"ok": True, "id": item_id, "action": "prioritized"}
 
 
 @app.post("/queue/{item_id}/play")

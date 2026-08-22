@@ -11,7 +11,7 @@ function readString(name: string, fallback: string = ''): string {
 }
 
 export const appConfig = reactive({
-  name: readString('VITE_WEB_APP_NAME', 'TSBot Music'),
+  name: readString('VITE_WEB_APP_NAME', 'QQ music TSBot'),
   iconHref: readString('VITE_WEB_APP_ICON', ''),
   publicUrl: readString('VITE_WEB_PUBLIC_URL', ''),
   logLevel: readString('VITE_LOG_LEVEL', 'INFO'),
